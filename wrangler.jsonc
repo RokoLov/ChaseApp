@@ -1,0 +1,11 @@
+// Cloudflare deployment settings: serve the built app from dist, and send every
+// unknown address (such as /lobby/K7P2QX) to the app so it can show the right screen.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chaseapp",
+  "compatibility_date": "2026-11-16",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}
