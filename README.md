@@ -2,21 +2,22 @@
 
 Real-world hide and seek for friends, refereed by your phone. CHASE is a PWA: a website that installs on the home screen like an app.
 
-## Status: milestone 3 of 8
+## Status: milestone 4 of 8
 
 | Works now | Not built yet |
 | --- | --- |
-| Welcome: nickname and profile photo | Starting and playing Battle Royale (milestone 4) |
-| Home, Profile, Settings | Results, stats, friends, replay (milestone 5) |
-| Light, Dark and System appearance | Sardines, Cops & Robbers (milestones 6 and 7) |
-| Create a game: mode, play area, rules | |
-| Draw the play area on a map: circle or polygon, up to 1 km across | |
-| Location: your own position on the map, inside or outside the area | |
-| Join by code, invite link or QR code | |
-| Live lobby: players, ready status, map, share, remove, leave | |
-| "Play here again" with the last play area | |
+| Welcome, Home, Profile, Settings; Light, Dark and System appearance | Full results, stats, friends, replay (milestone 5) |
+| Create a game: mode, play area on a map, rules | Sardines, Cops & Robbers (milestones 6 and 7) |
+| Join by code, invite link or QR code; live lobby | Pause for everyone and the emergency alert |
+| Start: safety checklist, hunters picked at random or by the host | |
+| Battle Royale: role reveal, shared timer, shrinking zone, alerts | |
+| Out-of-zone warning, then the hider becomes a hunter | |
+| Catches by QR scan or typed 4-digit code | |
+| Hunters see each other, and hiders for 20 seconds after each shrink | |
+| Pocket mode, alert sounds, screen kept awake | |
+| Game end with winner, and Play again | |
 
-Stats and friends are shown but stay empty until games exist. The lobby's Start button stays locked until milestone 4.
+Stats and friends on the Profile screen stay empty until milestone 5.
 
 ## Run it on your computer
 
@@ -48,4 +49,4 @@ Any static host with HTTPS works. Build command: `npm run build`. Output folder:
 - `src/lib` — theme, profile storage, backend connection, map maths, location
 - `src/index.css` — the CHASE Theme colours for dark and light
 - `supabase/schema.sql` — database tables and access rules
-- `scripts` — icon generator and a screenshot check (it replaces the backend with canned replies)
+- `scripts` — icon generator and two screenshot checks (they replace the backend with a pretend one)

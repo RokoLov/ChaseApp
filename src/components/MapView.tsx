@@ -13,15 +13,23 @@ const STYLE = {
   dark: 'https://tiles.openfreemap.org/styles/dark',
 }
 
+export type MapMarker = { position: LngLat; kind: 'hunter' | 'hider' }
+
 export type MapProps = {
   /** The play area to draw. */
   area?: Area | null
+  /** The current safe zone, when it is smaller than the play area. */
+  zone?: Area | null
+  /** The zone after the next shrink, drawn as a dashed line. */
+  nextZone?: Area | null
   /** Corner points to show while a polygon is being drawn. */
   corners?: LngLat[]
   /** Move the view here. Give a new `id` each time to move again. */
   flyTo?: { id: number; center: LngLat; zoom?: number } | null
   /** The player's own position. */
   me?: LngLat | null
+  /** Other players this phone is allowed to see. */
+  others?: MapMarker[]
   /** Keep the whole area in view (used where the map is only for looking). */
   fitArea?: boolean
   /** Let the player move and zoom the map. */
@@ -43,51 +51,67 @@ const polygonData = (area: Area | null | undefined) => ({
       : [],
 })
 
-const pointsData = (points: LngLat[]) => ({
+const pointsData = (points: { position: LngLat; kind?: string }[]) => ({
   type: 'FeatureCollection' as const,
   features: points.map((p) => ({
     type: 'Feature' as const,
-    properties: {},
-    geometry: { type: 'Point' as const, coordinates: p },
+    properties: { kind: p.kind ?? '' },
+    geometry: { type: 'Point' as const, coordinates: p.position },
   })),
 })
 
-/** A map with the play area and the player's position drawn on top. */
-export function MapView({
-  area,
-  corners,
-  flyTo,
-  me,
-  fitArea,
-  interactive = true,
-  initialCenter,
-  initialZoom,
-  onMove,
-  onTap,
-  className,
-}: MapProps) {
+/** A map with the play area, the zones and the visible players drawn on top. */
+export function MapView(props: MapProps) {
+  const { flyTo, interactive = true, initialCenter, initialZoom, className } = props
   const box = useRef<HTMLDivElement>(null)
   const map = useRef<MapLibreMap | null>(null)
   const ready = useRef(false)
-  const latest = useRef({ area, corners, me, fitArea, onMove, onTap })
-  latest.current = { area, corners, me, fitArea, onMove, onTap }
+  const latest = useRef(props)
+  latest.current = props
+  /** What was last sent to the map, so unchanged shapes are not sent again every second. */
+  const sent = useRef<Record<string, string>>({})
   const appearance = useTheme((s) => s.appearance)
   const theme = resolveTheme(appearance)
 
   function draw() {
     const m = map.current
     if (!m || !ready.current) return
-    const { area, corners, me, fitArea } = latest.current
-    ;(m.getSource('area') as GeoJSONSource | undefined)?.setData(polygonData(area))
-    ;(m.getSource('corners') as GeoJSONSource | undefined)?.setData(pointsData(corners ?? []))
-    ;(m.getSource('me') as GeoJSONSource | undefined)?.setData(pointsData(me ? [me] : []))
-    if (fitArea && area) m.fitBounds(boundsOf(area), { padding: 28, animate: false, maxZoom: 18 })
+    const { area, zone, nextZone, corners, me, others, fitArea } = latest.current
+    const set = (id: string, data: ReturnType<typeof polygonData> | ReturnType<typeof pointsData>) => {
+      const key = JSON.stringify(data)
+      if (sent.current[id] === key) return
+      sent.current[id] = key
+      ;(m.getSource(id) as GeoJSONSource | undefined)?.setData(data)
+    }
+    set('area', polygonData(area))
+    set('zone', polygonData(zone))
+    set('next', polygonData(nextZone))
+    set('corners', pointsData((corners ?? []).map((position) => ({ position }))))
+    set('others', pointsData(others ?? []))
+    set('me', pointsData(me ? [{ position: me }] : []))
+
+    // Once the zone has shrunk, the outer play area fades so the safe zone stands out.
+    const faded = zone ? '1' : '0'
+    if (sent.current.faded !== faded) {
+      sent.current.faded = faded
+      m.setPaintProperty('area-fill', 'fill-opacity', zone ? 0.04 : 0.18)
+      m.setPaintProperty('area-line', 'line-width', zone ? 1.5 : 3)
+    }
+
+    if (fitArea && area) {
+      const key = JSON.stringify(boundsOf(area))
+      if (sent.current.fit !== key) {
+        sent.current.fit = key
+        m.fitBounds(boundsOf(area), { padding: 28, animate: false, maxZoom: 18 })
+      }
+    }
   }
 
   // Build the map once per theme: the dark and light maps are different map designs.
   useEffect(() => {
     if (!box.current) return
     let fellBack = false
+    sent.current = {}
     const m = new MapLibreMap({
       container: box.current,
       style: STYLE[theme],
@@ -113,18 +137,37 @@ export function MapView({
     m.on('style.load', () => {
       const line = css('--c-brand-ink') || '#4a7300'
       const fill = css('--c-brand') || '#c6ff3d'
-      const empty = pointsData([])
+      const warn = css('--c-warn-ink') || '#8a5a00'
+      const hunter = css('--c-mode-br') || '#ff5a3c'
       if (m.getSource('area')) return
-      m.addSource('area', { type: 'geojson', data: polygonData(null) })
-      m.addSource('corners', { type: 'geojson', data: empty })
-      m.addSource('me', { type: 'geojson', data: empty })
+      for (const id of ['area', 'zone', 'next']) m.addSource(id, { type: 'geojson', data: polygonData(null) })
+      for (const id of ['corners', 'others', 'me']) m.addSource(id, { type: 'geojson', data: pointsData([]) })
       m.addLayer({ id: 'area-fill', type: 'fill', source: 'area', paint: { 'fill-color': fill, 'fill-opacity': 0.18 } })
       m.addLayer({ id: 'area-line', type: 'line', source: 'area', paint: { 'line-color': line, 'line-width': 3 } })
+      m.addLayer({ id: 'zone-fill', type: 'fill', source: 'zone', paint: { 'fill-color': fill, 'fill-opacity': 0.22 } })
+      m.addLayer({ id: 'zone-line', type: 'line', source: 'zone', paint: { 'line-color': line, 'line-width': 3 } })
+      m.addLayer({
+        id: 'next-line',
+        type: 'line',
+        source: 'next',
+        paint: { 'line-color': warn, 'line-width': 2, 'line-dasharray': [2, 2] },
+      })
       m.addLayer({
         id: 'corners',
         type: 'circle',
         source: 'corners',
         paint: { 'circle-radius': 6, 'circle-color': fill, 'circle-stroke-color': line, 'circle-stroke-width': 2 },
+      })
+      m.addLayer({
+        id: 'others',
+        type: 'circle',
+        source: 'others',
+        paint: {
+          'circle-radius': 7,
+          'circle-color': ['match', ['get', 'kind'], 'hunter', hunter, fill],
+          'circle-stroke-color': '#0b0f14',
+          'circle-stroke-width': 2,
+        },
       })
       m.addLayer({
         id: 'me',
@@ -133,6 +176,7 @@ export function MapView({
         paint: { 'circle-radius': 8, 'circle-color': '#2f7bff', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 3 },
       })
       ready.current = true
+      sent.current = {}
       draw()
     })
 

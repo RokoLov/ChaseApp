@@ -1,8 +1,9 @@
 import QRCode from 'qrcode'
 import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Navigate, useNavigate, useParams } from 'react-router-dom'
 import { MapView } from '../components/Map'
 import { Avatar, Button, LinkButton, Note, Screen } from '../components/ui'
+import { StartSheet } from '../components/StartSheet'
 import { kickPlayer, leaveGame, setReady, useLobby } from '../lib/games'
 import { distanceToAreaM, extentM, formatM } from '../lib/geo'
 import { locationHelp, useLocation } from '../lib/location'
@@ -35,6 +36,7 @@ export default function Lobby() {
   const [qr, setQr] = useState('')
   const [showQr, setShowQr] = useState(false)
   const [shared, setShared] = useState('')
+  const [starting, setStarting] = useState(false)
   const { location, start: startLocation } = useLocation()
 
   const link = `${window.location.origin}/join/${code.toUpperCase()}`
@@ -71,6 +73,8 @@ export default function Lobby() {
   }
 
   const { game, players } = state
+  // The host started the game (or it already ended): follow everyone to the game screen.
+  if (game.status !== 'lobby') return <Navigate to={`/game/${game.code}`} replace />
   const me = players.find((p) => p.id === profile?.id)
   const isHost = game.host_id === profile?.id
   const allReady = players.length >= 2 && players.every((p) => p.ready)
@@ -217,10 +221,12 @@ export default function Lobby() {
           <>
             <Note>
               {allReady
-                ? 'Everyone is ready. Starting the game arrives in milestone 4.'
+                ? 'Everyone is ready.'
                 : 'Start unlocks when at least 2 players are in and everyone is ready.'}
             </Note>
-            <Button disabled>Start game</Button>
+            <Button disabled={!allReady} onClick={() => setStarting(true)}>
+              Start game
+            </Button>
           </>
         ) : (
           <Note>{allReady ? `Waiting for ${hostName} to start.` : 'The host starts when everyone is ready.'}</Note>
@@ -232,6 +238,8 @@ export default function Lobby() {
           Leave lobby
         </button>
       </div>
+
+      {starting && <StartSheet game={game} players={players} onClose={() => setStarting(false)} onStarted={refresh} />}
     </Screen>
   )
 }

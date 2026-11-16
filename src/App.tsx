@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { useProfile } from './lib/profile'
 import Create from './pages/Create'
+import Game from './pages/Game'
 import Home from './pages/Home'
 import Join from './pages/Join'
 import Lobby from './pages/Lobby'
@@ -40,6 +41,7 @@ export default function App() {
           <Route path="/join" element={<Join />} />
           <Route path="/join/:code" element={<InviteLink />} />
           <Route path="/lobby/:code" element={<Lobby />} />
+          <Route path="/game/:code" element={<Game />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
