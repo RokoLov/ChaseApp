@@ -213,3 +213,49 @@ grant execute on function public.kick_player(uuid, uuid) to authenticated;
 
 -- Send live updates for these tables to the phones in the game.
 alter publication supabase_realtime add table public.games, public.game_players;
+
+-- ───────────────────────── Milestone 3: the play area ─────────────────────────
+
+-- A game is now created together with its play area.
+drop function public.create_game(text, text, jsonb);
+
+create function public.create_game(p_mode text, p_preset text, p_settings jsonb, p_area jsonb)
+returns text
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_uid uuid := (select auth.uid());
+  v_code text;
+  v_game uuid;
+  v_alphabet constant text := 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+begin
+  if v_uid is null or not exists (select 1 from public.players where id = v_uid) then
+    raise exception 'NO_PROFILE';
+  end if;
+  -- The play area is a circle (centre and radius in metres) or a polygon (3 to 30 corners).
+  if p_area is null
+     or not (
+       (p_area->>'type' = 'circle'
+          and jsonb_array_length(p_area->'center') = 2
+          and (p_area->>'radiusM')::numeric between 25 and 500)
+       or
+       (p_area->>'type' = 'polygon'
+          and jsonb_array_length(p_area->'points') between 3 and 30)
+     ) then
+    raise exception 'BAD_AREA';
+  end if;
+  loop
+    select string_agg(substr(v_alphabet, 1 + floor(random() * 32)::int, 1), '')
+      into v_code from generate_series(1, 6);
+    exit when not exists (select 1 from public.games where code = v_code);
+  end loop;
+  insert into public.games (code, host_id, mode, preset, settings, area)
+    values (v_code, v_uid, p_mode, p_preset, coalesce(p_settings, '{}'::jsonb), p_area)
+    returning id into v_game;
+  insert into public.game_players (game_id, player_id) values (v_game, v_uid);
+  return v_code;
+end;
+$$;
+
+revoke execute on function public.create_game(text, text, jsonb, jsonb) from public, anon;
+grant execute on function public.create_game(text, text, jsonb, jsonb) to authenticated;

@@ -1,7 +1,10 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { BackHeader, Button, Note, Screen } from '../components/ui'
+import { useLocation as useRoute, useNavigate } from 'react-router-dom'
+import { AreaPicker } from '../components/AreaPicker'
+import { Button, Note, Screen } from '../components/ui'
+import { useArena } from '../lib/arena'
 import { createGame } from '../lib/games'
+import type { Area } from '../lib/geo'
 import { modes, presets, ruleRows, type BattleRoyaleRules, type Mode, type Preset } from '../lib/rules'
 
 const modeBg: Record<Mode, string> = {
@@ -15,10 +18,16 @@ const modeBorder: Record<Mode, string> = {
   cops_robbers: 'border-mode-cnr',
 }
 
+const titles = { 1: 'Choose a mode', 2: 'Draw the play area', 3: 'Pick the rules' } as const
+
 export default function Create() {
   const navigate = useNavigate()
-  const [step, setStep] = useState<1 | 2>(1)
+  /** "Play here again" on Home passes the last play area along. */
+  const startArea = (useRoute().state as { area?: Area } | null)?.area ?? null
+  const setLastArea = useArena((s) => s.setLastArea)
+  const [step, setStep] = useState<1 | 2 | 3>(1)
   const [mode, setMode] = useState<Mode>('battle_royale')
+  const [area, setArea] = useState<Area | null>(startArea)
   const [preset, setPreset] = useState<Preset>('classic')
   const [rules, setRules] = useState<BattleRoyaleRules>(presets.classic)
   const [busy, setBusy] = useState(false)
@@ -35,10 +44,12 @@ export default function Create() {
   }
 
   async function create() {
+    if (!area) return
     setBusy(true)
     setError('')
     try {
-      const code = await createGame(mode, preset, rules)
+      const code = await createGame(mode, preset, rules, area)
+      setLastArea(area)
       navigate(`/lobby/${code}`, { replace: true })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The game could not be created.')
@@ -46,11 +57,27 @@ export default function Create() {
     }
   }
 
+  const header = (
+    <header className="flex items-center gap-3">
+      <button
+        type="button"
+        aria-label="Back"
+        onClick={() => (step === 1 ? navigate(-1) : setStep((step - 1) as 1 | 2))}
+        className="-ml-2 flex h-11 w-9 items-center justify-center text-3xl leading-none"
+      >
+        ‹
+      </button>
+      <div>
+        <h1 className="font-display text-[22px] font-bold leading-tight">{titles[step]}</h1>
+        <p className="text-[13px] font-medium text-muted">Step {step} of 3</p>
+      </div>
+    </header>
+  )
+
   if (step === 1) {
     return (
       <Screen>
-        <BackHeader title="Choose a mode" />
-        <p className="-mt-3 pl-10 text-[13px] font-medium text-muted">Step 1 of 2</p>
+        {header}
         {modes.map((m) => {
           const selected = mode === m.id
           return (
@@ -82,22 +109,24 @@ export default function Create() {
     )
   }
 
+  if (step === 2) {
+    return (
+      <Screen>
+        {header}
+        <AreaPicker initial={area} onChange={setArea} />
+        <div className="mt-auto flex flex-col gap-3">
+          <Note>Pick a place without busy roads, water or private property.</Note>
+          <Button onClick={() => setStep(3)} disabled={!area}>
+            Next
+          </Button>
+        </div>
+      </Screen>
+    )
+  }
+
   return (
     <Screen>
-      <header className="flex items-center gap-3">
-        <button
-          type="button"
-          aria-label="Back"
-          onClick={() => setStep(1)}
-          className="-ml-2 flex h-11 w-9 items-center justify-center text-3xl leading-none"
-        >
-          ‹
-        </button>
-        <div>
-          <h1 className="font-display text-[22px] font-bold leading-tight">Pick the rules</h1>
-          <p className="text-[13px] font-medium text-muted">Step 2 of 2</p>
-        </div>
-      </header>
+      {header}
 
       <div className="flex gap-2" role="radiogroup" aria-label="Preset">
         {(['quick', 'classic', 'custom'] as Preset[]).map((p) => (
@@ -163,13 +192,10 @@ export default function Create() {
       <p className="text-xs text-muted">
         {preset === 'custom' ? 'Use − and + to change a rule.' : 'Choose Custom to change any rule.'}
       </p>
-      <div className="rounded-xl bg-warn/15 p-3 text-[13px] font-semibold text-warn-ink">
-        Drawing the play area on the map arrives in milestone 3.
-      </div>
 
       <div className="mt-auto flex flex-col gap-3">
         {error && <Note>{error}</Note>}
-        <Button onClick={create} disabled={busy}>
+        <Button onClick={create} disabled={busy || !area}>
           {busy ? 'Creating…' : 'Create lobby'}
         </Button>
       </div>

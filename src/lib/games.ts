@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProfile } from './profile'
+import type { Area } from './geo'
 import type { BattleRoyaleRules, Mode, Preset } from './rules'
 import { supabase } from './supabase'
 
@@ -11,6 +12,7 @@ export type Game = {
   status: 'lobby' | 'running' | 'ended'
   preset: Preset
   settings: BattleRoyaleRules
+  area: Area | null
 }
 
 export type LobbyPlayer = {
@@ -26,6 +28,7 @@ const messages: Record<string, string> = {
   GAME_STARTED: 'That game has already started.',
   NO_PROFILE: 'Your profile is not saved online yet. Try again in a moment.',
   NOT_HOST: 'Only the host can do that.',
+  BAD_AREA: 'The play area is missing or too large. Draw it again.',
 }
 
 /** Turn a backend error into a sentence a player can act on. */
@@ -45,9 +48,19 @@ async function requireBackend() {
   return supabase
 }
 
-export async function createGame(mode: Mode, preset: Preset, settings: BattleRoyaleRules): Promise<string> {
+export async function createGame(
+  mode: Mode,
+  preset: Preset,
+  settings: BattleRoyaleRules,
+  area: Area,
+): Promise<string> {
   const db = await requireBackend()
-  const { data, error } = await db.rpc('create_game', { p_mode: mode, p_preset: preset, p_settings: settings })
+  const { data, error } = await db.rpc('create_game', {
+    p_mode: mode,
+    p_preset: preset,
+    p_settings: settings,
+    p_area: area,
+  })
   if (error || !data) throw new Error(friendly(error, 'The game could not be created. Try again.'))
   return data as string
 }
@@ -81,7 +94,7 @@ async function fetchLobby(code: string): Promise<{ game: Game; players: LobbyPla
   if (!supabase) return null
   const { data: game } = await supabase
     .from('games')
-    .select('id, code, host_id, mode, status, preset, settings')
+    .select('id, code, host_id, mode, status, preset, settings, area')
     .eq('code', code)
     .maybeSingle()
   if (!game) return null

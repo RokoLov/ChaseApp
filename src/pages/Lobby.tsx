@@ -1,8 +1,11 @@
 import QRCode from 'qrcode'
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { MapView } from '../components/Map'
 import { Avatar, Button, LinkButton, Note, Screen } from '../components/ui'
 import { kickPlayer, leaveGame, setReady, useLobby } from '../lib/games'
+import { distanceToAreaM, extentM, formatM } from '../lib/geo'
+import { locationHelp, useLocation } from '../lib/location'
 import { useProfile } from '../lib/profile'
 import { modeName, presetLabel, type Mode } from '../lib/rules'
 
@@ -32,6 +35,7 @@ export default function Lobby() {
   const [qr, setQr] = useState('')
   const [showQr, setShowQr] = useState(false)
   const [shared, setShared] = useState('')
+  const { location, start: startLocation } = useLocation()
 
   const link = `${window.location.origin}/join/${code.toUpperCase()}`
 
@@ -164,8 +168,48 @@ export default function Lobby() {
         ))}
       </ul>
 
+      {game.area && (
+        <section className="flex flex-col gap-2 rounded-[20px] bg-surface p-3">
+          <MapView
+            className="h-40 w-full overflow-hidden rounded-2xl bg-raised"
+            area={game.area}
+            me={location.status === 'on' ? location.position : null}
+            fitArea
+            interactive={false}
+          />
+          <div className="flex items-center gap-2 px-1 text-[13px]">
+            {location.status === 'idle' && (
+              <>
+                <span className="text-muted">See where you are compared to the play area.</span>
+                <button
+                  type="button"
+                  onClick={startLocation}
+                  className="ml-auto shrink-0 rounded-full bg-brand px-3 py-1.5 text-xs font-semibold text-on-brand"
+                >
+                  Show my position
+                </button>
+              </>
+            )}
+            {location.status === 'asking' && <span className="text-muted">Finding your position…</span>}
+            {location.status === 'on' &&
+              (distanceToAreaM(game.area, location.position) === 0 ? (
+                <span className="font-semibold text-brand-ink">You are inside the play area.</span>
+              ) : (
+                <span className="font-semibold text-warn-ink">
+                  You are {formatM(distanceToAreaM(game.area, location.position))} outside the play area.
+                </span>
+              ))}
+            {location.status === 'denied' && <span className="text-danger-ink">{locationHelp}</span>}
+            {location.status === 'unavailable' && (
+              <span className="text-warn-ink">Your phone cannot find its position right now.</span>
+            )}
+          </div>
+        </section>
+      )}
+
       <div className="rounded-xl bg-surface px-3.5 py-3 text-[13px] text-muted">
         {presetLabel(game.preset)} · {game.settings.gameMin} min · {game.settings.zoneStages} zone stages
+        {game.area ? ` · ${formatM(extentM(game.area))} area` : ''}
       </div>
 
       <div className="mt-auto flex flex-col gap-3">

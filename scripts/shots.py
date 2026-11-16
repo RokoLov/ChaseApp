@@ -33,6 +33,14 @@ def fake_session():
 
 
 state = {"ready": False}
+AREA = {"type": "circle", "center": [15.9779, 45.8131], "radiusM": 160}
+STYLE = {"version": 8, "sources": {}, "layers": [{"id": "bg", "type": "background", "paint": {"background-color": "#8fa3ad"}}]}
+
+
+def map_style(route):
+    """Stand-in for the real map design, which this check cannot download."""
+    route.fulfill(status=200, headers={**CORS, "content-type": "application/json"}, body=json.dumps(STYLE))
+
 
 
 def backend(route):
@@ -49,13 +57,17 @@ def backend(route):
     if "/rest/v1/rpc/create_game" in url or "/rest/v1/rpc/join_game" in url:
         if "ZZZZZZ" in (req.post_data or ""):
             return reply({"code": "P0001", "message": "GAME_NOT_FOUND"}, 400)
+        if "create_game" in url:
+            sent = json.loads(req.post_data)
+            assert sent["p_area"]["type"] in ("circle", "polygon"), sent
+            print("  area sent to backend:", sent["p_area"]["type"], sent["p_area"].get("radiusM"))
         return reply("K7P2QX")
     if "/rest/v1/rpc/set_ready" in url:
         state["ready"] = json.loads(req.post_data)["p_ready"]
         return route.fulfill(status=204, headers=CORS)
     if "/rest/v1/games" in url:
         game = {"id": GAME, "code": "K7P2QX", "host_id": UID, "mode": "battle_royale", "status": "lobby",
-                "preset": "classic", "settings": {"gameMin": 25, "hideMin": 3, "hunters": 0, "zoneStages": 4,
+                "preset": "classic", "area": AREA, "settings": {"gameMin": 25, "hideMin": 3, "hunters": 0, "zoneStages": 4,
                                                   "revealOnShrink": True, "graceSec": 60}}
         return reply(game if "pgrst.object" in req.headers.get("accept", "") else [game])
     if "/rest/v1/game_players" in url:
@@ -70,11 +82,13 @@ def backend(route):
 
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(executable_path="/usr/bin/google-chrome", args=["--no-sandbox"])
+    browser = p.chromium.launch(executable_path="/usr/bin/google-chrome", args=["--no-sandbox", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
     for scheme in ("dark", "light"):
         state["ready"] = False
-        ctx = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme=scheme)
+        ctx = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme=scheme,
+                                  permissions=["geolocation"], geolocation={"latitude": 45.8131, "longitude": 15.9779})
         ctx.route("**/*.supabase.co/**", backend)
+        ctx.route("**/tiles.openfreemap.org/**", map_style)
         page = ctx.new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
@@ -84,7 +98,7 @@ with sync_playwright() as p:
             page.screenshot(path=f"{out}/{scheme}-{name}.png")
 
         # A new player opens an invite link: Welcome first, then straight into the lobby.
-        page.goto(base + "/join/k7p2qx", wait_until="networkidle")
+        page.goto(base + "/join/k7p2qx", wait_until="load")
         shot("1-welcome")
         page.fill("input[aria-label=Nickname]", "Roko")
         page.click("text=Continue")
@@ -96,18 +110,39 @@ with sync_playwright() as p:
         page.click("button:has-text('QR')")
         shot("3-lobby-ready-qr")
 
-        page.goto(base + "/", wait_until="networkidle")
+        page.goto(base + "/", wait_until="load")
         shot("4-home")
         page.click("text=Create game")
         shot("5-create-mode")
         page.click("text=Next")
+        page.wait_for_selector("text=Area: not placed")
+        assert page.is_disabled("button:has-text('Next')"), "Next must be locked until the area is placed"
+        page.click("text=Use my location")
+        page.wait_for_selector("text=Area: 300 m across")
+        page.wait_for_timeout(900)
+        shot("6a-create-area-circle")
+        page.click("button[role=radio]:has-text('polygon')")
+        box = page.locator(".maplibregl-canvas").bounding_box()
+        for dx, dy in ((0.3, 0.3), (0.7, 0.3), (0.7, 0.7), (0.3, 0.7)):
+            page.mouse.click(box["x"] + box["width"] * dx, box["y"] + box["height"] * dy)
+            page.wait_for_timeout(350)
+        shot("6b-create-area-polygon")
+        page.click("button[role=radio]:has-text('circle')")
+        page.click("button:has-text('Next')")
         page.click("button:has-text('custom')")
         page.click("button[aria-label='More: Game length']")
-        shot("6-create-rules-custom")
+        shot("6c-create-rules-custom")
         page.click("text=Create lobby")
         page.wait_for_url(base + "/lobby/K7P2QX")
+        page.wait_for_selector("text=You are inside the play area")
+        page.wait_for_timeout(900)
+        shot("6d-lobby-with-map")
+        page.goto(base + "/", wait_until="load")
+        page.wait_for_selector("text=Play here again")
+        page.wait_for_timeout(900)
+        shot("6e-home-last-arena")
 
-        page.goto(base + "/join", wait_until="networkidle")
+        page.goto(base + "/join", wait_until="load")
         page.fill("input[aria-label='Game code']", "zzzzzz")
         page.click("button:has-text('Join')")
         page.wait_for_selector("[role=alert]")

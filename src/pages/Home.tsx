@@ -1,9 +1,14 @@
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
+import { MapView } from '../components/Map'
 import { Avatar, LinkButton, Screen, SectionLabel } from '../components/ui'
+import { useArena } from '../lib/arena'
+import { extentM, formatM } from '../lib/geo'
 import { useProfile } from '../lib/profile'
 
 export default function Home() {
   const profile = useProfile((s) => s.profile)
+  const lastArea = useArena((s) => s.lastArea)
+  const navigate = useNavigate()
   if (!profile) return null
 
   return (
@@ -39,9 +44,30 @@ export default function Home() {
       )}
 
       <SectionLabel>Last arena</SectionLabel>
-      <p className="rounded-2xl bg-surface p-4 text-sm text-muted">
-        The last play area you used will appear here.
-      </p>
+      {lastArea ? (
+        <div className="flex flex-col gap-3 rounded-[20px] bg-surface p-3">
+          <MapView
+            className="h-32 w-full overflow-hidden rounded-2xl bg-raised"
+            area={lastArea}
+            fitArea
+            interactive={false}
+          />
+          <div className="flex items-center px-1">
+            <span className="font-display font-medium">{formatM(extentM(lastArea))} across</span>
+            <button
+              type="button"
+              onClick={() => navigate('/create', { state: { area: lastArea } })}
+              className="ml-auto rounded-full bg-brand px-3 py-1.5 text-xs font-semibold text-on-brand"
+            >
+              Play here again
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="rounded-2xl bg-surface p-4 text-sm text-muted">
+          The last play area you used will appear here.
+        </p>
+      )}
     </Screen>
   )
 }
