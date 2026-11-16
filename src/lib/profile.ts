@@ -23,6 +23,8 @@ type ProfileState = {
   createProfile: (nickname: string, photoDataUrl: string | null) => Promise<void>
   updateProfile: (nickname: string, photoDataUrl: string | null) => Promise<void>
   resetProfile: () => Promise<void>
+  /** Make sure this phone is signed in to the backend. Online play needs it. */
+  ensureBackend: () => Promise<boolean>
 }
 
 const emptyStats: Stats = { games: 0, wins: 0, catches: 0, bestSurvivalSec: 0 }
@@ -82,6 +84,27 @@ export const useProfile = create<ProfileState>()(
           if (!(await saveToBackend(current.id, nickname, photo))) storedIn = 'phone'
         }
         set({ profile: { ...current, nickname, photo, storedIn } })
+      },
+
+      ensureBackend: async () => {
+        const current = get().profile
+        if (!supabase || !current) return false
+
+        const { data: sessionData } = await supabase.auth.getSession()
+        let userId = sessionData.session?.user.id
+        if (userId && userId === current.id && current.storedIn === 'backend') return true
+
+        // No session yet (for example the profile was made before sign-in was available):
+        // sign in now and move the profile to the hidden ID the backend hands out.
+        if (!userId) {
+          const { data, error } = await supabase.auth.signInAnonymously()
+          if (error || !data.user) return false
+          userId = data.user.id
+        }
+        const photo = await uploadPhoto(userId, current.photo)
+        if (!(await saveToBackend(userId, current.nickname, photo))) return false
+        set({ profile: { ...current, id: userId, photo, storedIn: 'backend' } })
+        return true
       },
 
       resetProfile: async () => {

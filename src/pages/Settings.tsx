@@ -86,7 +86,7 @@ export default function Settings() {
             Reset profile
           </Button>
         )}
-        <Note>CHASE version 0.1 · milestone 1</Note>
+        <Note>CHASE version 0.2 · milestone 2</Note>
       </div>
     </Screen>
   )

@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { PhotoPicker } from '../components/PhotoPicker'
 import { Button, Note, Screen } from '../components/ui'
 import { useProfile } from '../lib/profile'
@@ -11,7 +10,6 @@ const cards = [
 ]
 
 export default function Welcome() {
-  const navigate = useNavigate()
   const createProfile = useProfile((s) => s.createProfile)
   const [nickname, setNickname] = useState('')
   const [photo, setPhoto] = useState<string | null>(null)
@@ -23,8 +21,8 @@ export default function Welcome() {
   async function submit() {
     if (!valid || busy) return
     setBusy(true)
+    // The app then moves on by itself: to Home, or to the invite link that was opened.
     await createProfile(nickname.trim(), photo)
-    navigate('/', { replace: true })
   }
 
   return (

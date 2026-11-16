@@ -2,17 +2,18 @@
 
 Real-world hide and seek for friends, refereed by your phone. CHASE is a PWA: a website that installs on the home screen like an app.
 
-## Status: milestone 1 of 8
+## Status: milestone 2 of 8
 
 | Works now | Not built yet |
 | --- | --- |
-| Welcome: nickname and profile photo | Create game, Join game, Lobby (milestones 2 and 3) |
-| Home, Profile, Settings | Maps and location (milestone 3) |
-| Light, Dark and System appearance | Battle Royale (milestone 4) |
-| Installable on the home screen | Results, stats, friends, replay (milestone 5) |
-| Profile saved on the phone | Sardines, Cops & Robbers (milestones 6 and 7) |
+| Welcome: nickname and profile photo | Drawing the play area, maps, location (milestone 3) |
+| Home, Profile, Settings | Starting and playing Battle Royale (milestone 4) |
+| Light, Dark and System appearance | Results, stats, friends, replay (milestone 5) |
+| Create a game: mode and rules (Quick, Classic, Custom) | Sardines, Cops & Robbers (milestones 6 and 7) |
+| Join by code, invite link or QR code | |
+| Live lobby: players, ready status, share, remove, leave | |
 
-Stats and friends are shown but stay empty until games exist.
+Stats and friends are shown but stay empty until games exist. The lobby's Start button stays locked until milestone 4.
 
 ## Run it on your computer
 
@@ -44,4 +45,4 @@ Any static host with HTTPS works. Build command: `npm run build`. Output folder:
 - `src/lib` — theme, profile storage, backend connection
 - `src/index.css` — the CHASE Theme colours for dark and light
 - `supabase/schema.sql` — database tables and access rules
-- `scripts` — icon generator and a screenshot check
+- `scripts` — icon generator and a screenshot check (it replaces the backend with canned replies)
