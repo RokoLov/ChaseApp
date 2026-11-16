@@ -25,21 +25,17 @@ npm run dev
 
 Open the address it prints. To try it on a phone on the same Wi-Fi, run `npm run dev -- --host` and open the "Network" address. Location and installing need HTTPS, so those are tested on the deployed site, not this way.
 
-## Connect the backend (Supabase)
+## Backend (Supabase)
 
-Without this step the app still runs and keeps the profile on the phone only.
+The backend is already created (project "chase", Frankfurt region) and its address and public key are in `.env`. Both values are public by design; the database rules in `supabase/schema.sql` are what protect the data.
 
-1. Create a free project at [supabase.com](https://supabase.com).
-2. In the dashboard, open **Authentication > Sign In / Providers** and turn on **Anonymous** sign-ins.
-3. Open **SQL Editor**, paste the contents of `supabase/schema.sql`, and run it.
-4. Copy `.env.example` to `.env.local` and fill in the project URL and anon key from **Project Settings > API**.
-5. Restart `npm run dev`. Settings then shows "Backend: Connected".
+One setting must be on in the Supabase dashboard: **Authentication > Sign In / Providers > Allow anonymous sign-ins**. Without it the app still works, and Settings shows "Profile storage: This phone only".
 
-The anon key is designed to be public; the database rules in `schema.sql` are what protect the data.
+`supabase/schema.sql` is a copy of what has been applied to the database.
 
 ## Deploy
 
-Any static host with HTTPS works. Build command: `npm run build`. Output folder: `dist`. Add the two `VITE_SUPABASE_...` values as environment variables on the host.
+Any static host with HTTPS works. Build command: `npm run build`. Output folder: `dist`.
 
 ## Project layout
 
