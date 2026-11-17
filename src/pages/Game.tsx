@@ -18,10 +18,12 @@ import {
   catchPlayer,
   endGame,
   fetchClockOffset,
+  fetchRound,
   fetchEvents,
   fetchMyCode,
   fetchSeen,
   leaveGame,
+  markHidden,
   reportPosition,
   resetGame,
   sweepSignal,
@@ -30,6 +32,7 @@ import {
   type Game as GameData,
   type GameEvent,
   type Player,
+  type Round,
   type Seen,
 } from '../lib/games'
 import { formatM } from '../lib/geo'
@@ -38,6 +41,7 @@ import { useProfile } from '../lib/profile'
 import { play, unlockSound, type Sound } from '../lib/sound'
 import { supabase } from '../lib/supabase'
 import { useWakeLock, wakeLockSupported } from '../lib/wake'
+import { RoundResults } from './Results'
 
 /** Run `fn` every `ms` while `on` is true. Always calls the newest version of `fn`. */
 function useEvery(fn: () => void, ms: number, on = true) {
@@ -96,7 +100,7 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
   const navigate = useNavigate()
   const rules = game.settings
   const area = game.area!
-  const tl = timeline(Date.parse(game.started_at!), rules)
+  const tl = timeline(Date.parse(game.started_at!), rules, game.hide_ended_at ? Date.parse(game.hide_ended_at) : null)
 
   // The backend's clock, so every phone counts down together.
   const [offset, setOffset] = useState(0)
@@ -116,13 +120,16 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
   const revealing = rules.revealOnShrink && isRevealWindow(tl, now)
   const hidersLeft = players.filter((p) => p.role === 'hider').length
   const hunters = players.filter((p) => p.role === 'hunter').length
+  const hidersHidden = players.filter((p) => p.role === 'hider' && p.hidden).length
   const name = (id: string | null) => (id === meId ? 'You' : (players.find((p) => p.id === id)?.nickname ?? 'A player'))
 
   const { location, start: startLocation } = useLocation()
   const [entered, setEntered] = useState(false)
   useWakeLock(entered)
   const [alert, setAlert] = useState<Alert | null>(null)
-  const [sheet, setSheet] = useState<null | 'code' | 'catch' | 'map' | 'menu'>(null)
+  const [sheet, setSheet] = useState<null | 'code' | 'catch' | 'menu'>(null)
+  const [mapOpen, setMapOpen] = useState(false)
+  const [fly, setFly] = useState<{ id: number; center: [number, number]; zoom: number } | null>(null)
   const [pocket, setPocket] = useState(false)
   const [myCode, setMyCode] = useState<string | null>(null)
   const [seen, setSeen] = useState<Seen[]>([])
@@ -167,7 +174,6 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
     previous.current = now
     if (!entered || before === 0 || now - before > 5000) return
     const crossed = (t: number) => before < t && now >= t
-    if (crossed(tl.hideEnd)) notify('Hunters are released!', 'warn', 'release')
     for (const s of tl.shrinks) {
       if (crossed(s - WARN_MS)) notify('The zone shrinks in 60 seconds.', 'warn', 'warn')
       if (crossed(s)) {
@@ -178,6 +184,22 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
     }
     if (crossed(tl.end - 60_000)) notify('1 minute left.', 'warn', 'warn')
   })
+
+  // Hunters are released: by the hide timer, or early once every hider said they are hidden.
+  const wasHunting = useRef<boolean | null>(null)
+  useEffect(() => {
+    if (!entered) return
+    if (wasHunting.current === false && hunting) {
+      const early = game.hide_ended_at !== null
+      notify(early ? 'Everyone is hidden. Hunters are released!' : 'Hunters are released!', 'warn', 'release')
+    }
+    wasHunting.current = hunting
+  })
+
+  async function toggleHidden() {
+    await markHidden(game.id, !me?.hidden)
+    refresh()
+  }
 
   // Things other players did: catches, zone exits, lost signal.
   const lastEvent = useRef<number | null>(null)
@@ -276,7 +298,7 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
           <p className="max-w-[300px] text-[15px] text-muted">
             {role === 'hider'
               ? 'Hide inside the play area. You may move at any time.'
-              : 'Wait at the start until hide time ends, then find the hiders and enter their codes.'}
+              : 'Wait at the start until every hider is hidden or hide time ends. Then find the hiders and enter their codes.'}
           </p>
         </div>
         <div className="flex flex-col items-center">
@@ -322,7 +344,9 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
     role === 'hider'
       ? hunting
         ? 'Stay hidden inside the zone'
-        : 'Go and hide inside the play area'
+        : me?.hidden
+          ? 'Hidden. Waiting for the others'
+          : 'Go and hide inside the play area'
       : hunting
         ? 'Find the hiders and enter their codes'
         : 'Wait here until hide time ends'
@@ -367,7 +391,10 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
 
       <div className="relative h-[200px] overflow-hidden rounded-2xl bg-surface">
         <MapView className="h-full w-full" fitArea interactive={false} {...mapProps} />
-        <button type="button" aria-label="Open the full map" onClick={() => setSheet('map')} className="absolute inset-0" />
+        <button type="button" aria-label="Open the full map" onClick={() => setMapOpen(true)} className="absolute inset-0" />
+        <span className="pointer-events-none absolute right-2.5 top-2.5 rounded-full bg-surface/90 px-2.5 py-1 text-xs font-semibold text-ink shadow">
+          ⤢ Full map
+        </span>
       </div>
 
       <div className="flex gap-2.5">
@@ -376,6 +403,12 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
       </div>
 
       <div className="mt-auto flex flex-col gap-3">
+        {!hunting && <HideProgress hidden={hidersHidden} total={hidersLeft} timeLeftMs={tl.hideEnd - now} />}
+        {role === 'hider' && !hunting && (
+          <Button kind={me?.hidden ? 'secondary' : 'primary'} onClick={toggleHidden}>
+            {me?.hidden ? 'Not hidden yet (undo)' : 'I’m hidden'}
+          </Button>
+        )}
         {role === 'hider' ? (
           <button
             type="button"
@@ -392,7 +425,7 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
           </button>
         ) : (
           <Button onClick={() => setSheet('catch')} disabled={!hunting}>
-            {hunting ? 'Catch a hider' : `Catching opens in ${clock(tl.hideEnd - now)}`}
+            {hunting ? 'Catch a hider' : `Catching opens in ${clock(tl.hideEnd - now)} or when all are hidden`}
           </Button>
         )}
         <Button kind="secondary" onClick={() => setPocket(true)}>
@@ -401,32 +434,93 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
         {!wakeLockSupported && <Note>This phone cannot keep its screen on by itself. Set auto-lock to “Never” while playing.</Note>}
       </div>
 
+      {mapOpen && (
+        <div className="fixed inset-0 z-40 flex flex-col bg-bg">
+          {/* The map fills the space above the info panel, so the whole area stays in view. */}
+          <div className="relative flex-1">
+            <div className="absolute inset-0 pb-5">
+              <MapView className="h-full w-full" fitArea flyTo={fly} {...mapProps} />
+            </div>
+            <div className="absolute inset-x-3 top-[max(0.75rem,env(safe-area-inset-top))] flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="Close the full map"
+              onClick={() => setMapOpen(false)}
+              className="flex h-12 w-12 items-center justify-center rounded-full bg-surface/95 text-xl font-bold text-ink shadow-lg"
+            >
+              ✕
+            </button>
+            <span className="rounded-full bg-surface/95 px-3 py-1.5 text-xs font-semibold text-muted shadow-lg">
+              {stage === 0 ? 'Whole area is safe' : `Zone ${stage} of ${rules.zoneStages}`}
+            </span>
+            {location.status === 'on' && (
+              <button
+                type="button"
+                onClick={() => setFly({ id: Date.now(), center: location.position, zoom: 17 })}
+                className="ml-auto h-12 rounded-full bg-surface/95 px-4 text-sm font-semibold text-ink shadow-lg"
+              >
+                ◎ Me
+              </button>
+            )}
+            </div>
+          </div>
+          <div className="relative z-10 -mt-5 flex flex-col gap-2.5 rounded-t-[24px] bg-surface px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3.5 shadow-[0_-8px_24px_rgba(0,0,0,0.25)]">
+            <div className="flex items-center gap-3">
+              <span className="rounded-full bg-mode-br px-3 py-1.5 font-display text-sm font-bold uppercase text-on-brand">{role}</span>
+              <div className="flex flex-col">
+                <span className="font-display text-[40px] font-bold leading-none">{clock(tl.end - now)}</span>
+                <span className="text-xs font-medium text-muted">
+                  {!hunting
+                    ? `Hunters start in ${clock(tl.hideEnd - now)}`
+                    : upcoming
+                      ? `Zone shrinks in ${clock(upcoming - now)}`
+                      : 'Final zone'}
+                </span>
+              </div>
+              <div className="ml-auto flex gap-3 text-center">
+                <div className="flex flex-col">
+                  <span className="font-display text-2xl font-bold leading-none">{hidersLeft}</span>
+                  <span className="text-[11px] text-muted">hiders</span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="font-display text-2xl font-bold leading-none">{hunters}</span>
+                  <span className="text-[11px] text-muted">hunters</span>
+                </div>
+              </div>
+            </div>
+            {banner && (
+              <div role="status" className={`rounded-xl px-3 py-2 text-sm font-semibold ${toneClass[banner.tone]}`}>
+                {banner.text}
+              </div>
+            )}
+            <div className="flex gap-2.5">
+              {role === 'hider' ? (
+                <button
+                  type="button"
+                  onClick={() => setSheet('code')}
+                  disabled={!myCode}
+                  className="flex h-14 flex-1 items-center justify-center gap-2 rounded-2xl bg-raised font-display"
+                >
+                  <span className="text-xs font-semibold uppercase text-muted">My code</span>
+                  <span className="text-2xl font-bold tracking-[0.15em]">{myCode ?? '····'}</span>
+                </button>
+              ) : (
+                <div className="flex-1">
+                  <Button onClick={() => setSheet('catch')} disabled={!hunting}>
+                    {hunting ? 'Catch a hider' : `Catching opens in ${clock(tl.hideEnd - now)}`}
+                  </Button>
+                </div>
+              )}
+            </div>
+            <p className="text-[11px] text-muted">
+              Blue dot: you · Green: safe zone{nextZone ? ' · Dashed: next zone' : ''}
+              {role === 'hunter' ? ' · Orange: hunters, green dots: hiders during a reveal' : ' · Hunters see you briefly after each shrink'}
+            </p>
+          </div>
+        </div>
+      )}
       {sheet === 'code' && myCode && <CodeSheet code={myCode} onClose={() => setSheet(null)} />}
       {sheet === 'catch' && <CatchSheet onSubmit={submitCatch} onClose={() => setSheet(null)} />}
-      {sheet === 'map' && (
-        <Sheet title="Map" onClose={() => setSheet(null)}>
-          <MapView className="h-[60dvh] w-full overflow-hidden rounded-2xl bg-surface" fitArea {...mapProps} />
-          <div className="flex flex-wrap gap-2 text-xs font-semibold">
-            <span className="rounded-full bg-raised px-2.5 py-1 text-muted">Blue dot: you</span>
-            <span className="rounded-full bg-brand px-2.5 py-1 text-on-brand">Safe zone</span>
-            {nextZone && <span className="rounded-full bg-warn/15 px-2.5 py-1 text-warn-ink">Dashed: next zone</span>}
-            {role === 'hunter' && <span className="rounded-full bg-mode-br px-2.5 py-1 text-on-brand">Other hunters</span>}
-          </div>
-          <p className="text-xs text-muted">
-            {role === 'hunter'
-              ? 'You see the other hunters, and the hiders for a moment after each zone shrink.'
-              : 'You see only yourself. Hunters see you for a moment after each zone shrink.'}
-          </p>
-          <p className="text-xs text-muted">
-            Zone stage {stage} of {rules.zoneStages}
-          </p>
-          <div className="mt-auto">
-            <Button kind="secondary" onClick={() => setSheet(null)}>
-              Close
-            </Button>
-          </div>
-        </Sheet>
-      )}
       {sheet === 'menu' && (
         <Sheet title="Game menu" onClose={() => setSheet(null)}>
           <p className="text-sm text-muted">Leaving removes you from this game. The others keep playing.</p>
@@ -445,44 +539,50 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
   )
 }
 
+/** During hide time: how many hiders are hidden, and when hunters go anyway. */
+function HideProgress({ hidden, total, timeLeftMs }: { hidden: number; total: number; timeLeftMs: number }) {
+  return (
+    <div className="flex flex-col gap-1.5 rounded-2xl bg-surface p-3">
+      <div className="flex items-baseline">
+        <span className="font-display text-[15px] font-medium">
+          {hidden} of {total} hiders hidden
+        </span>
+        <span className="ml-auto text-xs text-muted">Hunters go in {clock(timeLeftMs)}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-raised">
+        <div className="h-full rounded-full bg-brand" style={{ width: `${total ? (hidden / total) * 100 : 0}%` }} />
+      </div>
+      <span className="text-xs text-muted">Hunters are released as soon as every hider taps “I’m hidden”.</span>
+    </div>
+  )
+}
+
 // ───────────────────────────── After the game ─────────────────────────────
 
 function Ended({ game, players, meId, refresh }: { game: GameData; players: Player[]; meId: string; refresh: () => void }) {
   const navigate = useNavigate()
   const [error, setError] = useState('')
+  const [round, setRound] = useState<Round | null | 'loading'>('loading')
   const isHost = game.host_id === meId
-  const nameOf = (id: string | null) => players.find((p) => p.id === id)?.nickname ?? 'a player'
-  const winners = players.filter((p) => game.winners.includes(p.id))
+  const hostName = players.find((p) => p.id === game.host_id)?.nickname ?? 'The host'
 
   useEffect(() => play('end'), [])
 
-  const title =
-    game.end_reason === 'all_caught' || winners.length === 0
-      ? 'Hunters win'
-      : winners.length === 1
-        ? `${winners[0].nickname} wins`
-        : `${winners.length} hiders survived`
-  const reason =
-    game.end_reason === 'last_hider'
-      ? 'Last hider standing'
-      : game.end_reason === 'time'
-        ? 'Time ran out with hiders still free'
-        : 'Every hider was caught'
-
-  const outcome = (p: Player) => {
-    const base = game.winners.includes(p.id)
-      ? 'Survived'
-      : p.hunterReason === 'start'
-        ? 'Started as a hunter'
-        : p.hunterReason === 'caught'
-          ? `Caught by ${nameOf(p.caughtBy)}`
-          : p.hunterReason === 'zone'
-            ? 'Left the zone'
-            : p.hunterReason === 'signal'
-              ? 'Lost signal'
-              : ''
-    return p.catches > 0 ? `${base} · ${p.catches} ${p.catches === 1 ? 'catch' : 'catches'}` : base
-  }
+  // The backend saves the results the moment the game ends. Ask again briefly in case of a slow connection.
+  useEffect(() => {
+    let tries = 0
+    let stopped = false
+    const load = async () => {
+      const r = await fetchRound(game.id, game.round)
+      if (stopped) return
+      if (r || ++tries >= 4) setRound(r)
+      else window.setTimeout(load, 1500)
+    }
+    void load()
+    return () => {
+      stopped = true
+    }
+  }, [game.id, game.round])
 
   async function again() {
     try {
@@ -493,51 +593,53 @@ function Ended({ game, players, meId, refresh }: { game: GameData; players: Play
     }
   }
 
-  async function leave() {
+  async function home() {
     await leaveGame(game.id)
     navigate('/', { replace: true })
   }
 
+  if (round === 'loading')
+    return (
+      <Screen>
+        <p className="mt-24 text-center text-muted">Adding up the results…</p>
+      </Screen>
+    )
+
+  const actions = (
+    <>
+      {error && <Note>{error}</Note>}
+      {isHost ? (
+        <Button onClick={again}>Play again</Button>
+      ) : (
+        <Note>{hostName} can start another round. You will return to the lobby automatically.</Note>
+      )}
+      {round && <LinkButton to={`/replay/${game.id}/${game.round}`} kind="secondary">Watch replay</LinkButton>}
+      <Button kind="secondary" onClick={home}>
+        Home
+      </Button>
+      <Note>Home takes you out of this lobby. Your results stay on your profile.</Note>
+    </>
+  )
+
+  if (round) return <RoundResults round={round} meId={meId} actions={actions} />
+
+  // Results were not saved (for example a game that ended before this version): a short summary.
   return (
     <Screen>
-      <header className="flex items-center">
-        <h1 className="font-display text-2xl font-bold">Game over</h1>
-        <span className="ml-auto rounded-full bg-mode-br px-2.5 py-1 text-xs font-semibold text-on-brand">Battle Royale</span>
-      </header>
-
-      <div className="flex flex-col items-center gap-1 py-2 text-center">
-        {winners.length === 1 && <Avatar name={winners[0].nickname} photo={winners[0].photo} size={76} ring="brand" />}
-        <span className="font-display text-[30px] font-bold leading-tight">{title}</span>
-        <span className="text-[13px] text-muted">{reason}</span>
-      </div>
-
+      <h1 className="font-display text-2xl font-bold">Game over</h1>
       <ul className="flex flex-col gap-2.5">
         {players.map((p) => (
           <li key={p.id} className="flex items-center gap-2.5">
             <Avatar name={p.nickname} photo={p.photo} size={36} ring={game.winners.includes(p.id) ? 'brand' : 'line'} />
-            <div className="flex flex-col">
-              <span className="font-display font-medium">
-                {p.nickname}
-                {p.id === meId ? ' (you)' : ''}
-              </span>
-              <span className="text-xs text-muted">{outcome(p)}</span>
-            </div>
+            <span className="font-display font-medium">
+              {p.nickname}
+              {p.id === meId ? ' (you)' : ''}
+            </span>
+            <span className="ml-auto text-xs text-muted">{game.winners.includes(p.id) ? 'Survived' : ''}</span>
           </li>
         ))}
       </ul>
-
-      <div className="mt-auto flex flex-col gap-3">
-        {error && <Note>{error}</Note>}
-        {isHost ? (
-          <Button onClick={again}>Play again</Button>
-        ) : (
-          <Note>{nameOf(game.host_id)} can start another round. You will return to the lobby automatically.</Note>
-        )}
-        <Button kind="secondary" onClick={leave}>
-          Leave
-        </Button>
-        <Note>Full results, stats and the replay arrive in milestone 5.</Note>
-      </div>
+      <div className="mt-auto flex flex-col gap-3">{actions}</div>
     </Screen>
   )
 }

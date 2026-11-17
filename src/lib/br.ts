@@ -1,7 +1,7 @@
 /**
  * Battle Royale timing and zones. Everything here is worked out from the game's start
  * time and rules, so every phone gets the same answer without asking the backend.
- * The backend uses the same formulas (see get_reveal in supabase/schema.sql).
+ * The backend uses the same formulas (see hide_end and get_reveal in supabase/schema.sql).
  */
 import { contains, distanceM, distanceToAreaM, type Area, type LngLat } from './geo.ts'
 import type { BattleRoyaleRules } from './rules.ts'
@@ -22,9 +22,12 @@ export type Timeline = {
   shrinks: number[]
 }
 
-/** All times are milliseconds since 1970, the same unit as Date.now(). */
-export function timeline(startMs: number, rules: BattleRoyaleRules): Timeline {
-  const hideEnd = startMs + rules.hideMin * 60_000
+/**
+ * All times are milliseconds since 1970, the same unit as Date.now().
+ * `hideEndedMs` is when every hider said they were hidden, if that came before the hide timer.
+ */
+export function timeline(startMs: number, rules: BattleRoyaleRules, hideEndedMs: number | null = null): Timeline {
+  const hideEnd = Math.min(startMs + rules.hideMin * 60_000, hideEndedMs ?? Infinity)
   const end = startMs + rules.gameMin * 60_000
   const step = (end - hideEnd) / (rules.zoneStages + 1)
   const shrinks = Array.from({ length: rules.zoneStages }, (_, i) => hideEnd + step * (i + 1))

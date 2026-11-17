@@ -17,6 +17,10 @@ export type Game = {
   ended_at: string | null
   winners: string[]
   end_reason: 'last_hider' | 'all_caught' | 'time' | null
+  /** Set when every hider said they were hidden before the hide timer ran out. */
+  hide_ended_at: string | null
+  /** Counts up each time the game starts ("Play again" starts round 2, 3...). */
+  round: number
 }
 
 export type Player = {
@@ -29,11 +33,13 @@ export type Player = {
   hunterReason: 'start' | 'caught' | 'zone' | 'signal' | null
   caughtBy: string | null
   catches: number
+  /** A hider tapped "I'm hidden". */
+  hidden: boolean
 }
 
 export type GameEvent = {
   id: number
-  type: 'start' | 'caught' | 'zone' | 'signal' | 'end'
+  type: 'start' | 'caught' | 'zone' | 'signal' | 'end' | 'release'
   actor: string | null
   target: string | null
 }
@@ -129,6 +135,9 @@ export async function resetGame(gameId: string) {
   if (error) throw new Error(friendly(error, 'Could not go back to the lobby. Try again.'))
 }
 
+/** A hider says they are hidden (or not yet). When every hider is, hunters are released early. */
+export const markHidden = (gameId: string, hidden: boolean) => supabase?.rpc('mark_hidden', { p_game: gameId, p_hidden: hidden })
+
 export const zoneOut = (gameId: string) => supabase?.rpc('zone_out', { p_game: gameId })
 export const sweepSignal = (gameId: string) => supabase?.rpc('sweep_signal', { p_game: gameId })
 export const endGame = (gameId: string) => supabase?.rpc('end_game', { p_game: gameId })
@@ -194,6 +203,7 @@ type PlayerRow = {
   hunter_reason: Player['hunterReason']
   caught_by: string | null
   catches: number
+  hidden: boolean | null
   players: { nickname: string; photo_url: string | null } | { nickname: string; photo_url: string | null }[] | null
 }
 
@@ -201,7 +211,7 @@ async function fetchLobby(code: string): Promise<{ game: Game; players: Player[]
   if (!supabase) return null
   const { data: game } = await supabase
     .from('games')
-    .select('id, code, host_id, mode, status, preset, settings, area, started_at, ended_at, winners, end_reason')
+    .select('id, code, host_id, mode, status, preset, settings, area, started_at, ended_at, winners, end_reason, hide_ended_at, round')
     .eq('code', code)
     .maybeSingle()
   if (!game) return null
@@ -209,7 +219,7 @@ async function fetchLobby(code: string): Promise<{ game: Game; players: Player[]
   const { data: rows } = await supabase
     .from('game_players')
     .select(
-      'player_id, ready, role, hunter_since, hunter_reason, caught_by, catches, players!game_players_player_id_fkey(nickname, photo_url)',
+      'player_id, ready, role, hunter_since, hunter_reason, caught_by, catches, hidden, players!game_players_player_id_fkey(nickname, photo_url)',
     )
     .eq('game_id', game.id)
     .order('joined_at')
@@ -225,9 +235,11 @@ async function fetchLobby(code: string): Promise<{ game: Game; players: Player[]
       hunterReason: r.hunter_reason,
       caughtBy: r.caught_by,
       catches: r.catches ?? 0,
+      hidden: r.hidden ?? false,
     }
   })
-  return { game: { ...(game as Game), winners: (game as Game).winners ?? [] }, players }
+  const g = game as Game
+  return { game: { ...g, winners: g.winners ?? [], round: g.round ?? 0, hide_ended_at: g.hide_ended_at ?? null }, players }
 }
 
 export type LobbyState =
@@ -296,4 +308,136 @@ export function useLobby(code: string, everyMs = 8000): { state: LobbyState; ref
   }, [code, everyMs, refresh])
 
   return { state, refresh: () => void refresh() }
+}
+
+// ───────────────────────────── After the game ─────────────────────────────
+
+export type RoundPlayer = {
+  id: string
+  nickname: string
+  photo: string | null
+  startRole: 'hider' | 'hunter'
+  won: boolean
+  /** Seconds from the start until caught, or until the end. Hiders only. */
+  survivedSec: number | null
+  catches: number
+  caughtBy: string | null
+  outReason: 'caught' | 'zone' | 'signal' | null
+  outAt: string | null
+}
+
+export type Round = {
+  gameId: string
+  round: number
+  mode: Mode
+  area: Area | null
+  settings: BattleRoyaleRules
+  startedAt: string
+  huntAt: string
+  endedAt: string
+  endReason: Game['end_reason']
+  players: RoundPlayer[]
+}
+
+type RoundPlayerRow = {
+  player_id: string
+  start_role: RoundPlayer['startRole']
+  won: boolean
+  survived_sec: number | null
+  catches: number
+  caught_by: string | null
+  out_reason: RoundPlayer['outReason']
+  out_at: string | null
+  players: { nickname: string; photo_url: string | null } | { nickname: string; photo_url: string | null }[] | null
+}
+
+/** The saved results of a finished round. Only players of that round can read them. */
+export async function fetchRound(gameId: string, round: number): Promise<Round | null> {
+  if (!supabase) return null
+  const { data: r } = await supabase
+    .from('game_rounds')
+    .select('game_id, round, mode, area, settings, started_at, hunt_at, ended_at, end_reason')
+    .eq('game_id', gameId)
+    .eq('round', round)
+    .maybeSingle()
+  if (!r) return null
+  const { data: rows } = await supabase
+    .from('round_players')
+    .select(
+      'player_id, start_role, won, survived_sec, catches, caught_by, out_reason, out_at, players!round_players_player_id_fkey(nickname, photo_url)',
+    )
+    .eq('game_id', gameId)
+    .eq('round', round)
+  const players = ((rows ?? []) as RoundPlayerRow[]).map((x) => {
+    const p = Array.isArray(x.players) ? x.players[0] : x.players
+    return {
+      id: x.player_id,
+      nickname: p?.nickname ?? 'Player',
+      photo: p?.photo_url ?? null,
+      startRole: x.start_role,
+      won: x.won,
+      survivedSec: x.survived_sec,
+      catches: x.catches,
+      caughtBy: x.caught_by,
+      outReason: x.out_reason,
+      outAt: x.out_at,
+    }
+  })
+  const row = r as {
+    game_id: string
+    round: number
+    mode: Mode
+    area: Area | null
+    settings: BattleRoyaleRules
+    started_at: string
+    hunt_at: string
+    ended_at: string
+    end_reason: Game['end_reason']
+  }
+  return {
+    gameId: row.game_id,
+    round: row.round,
+    mode: row.mode,
+    area: row.area,
+    settings: row.settings,
+    startedAt: row.started_at,
+    huntAt: row.hunt_at,
+    endedAt: row.ended_at,
+    endReason: row.end_reason,
+    players: rankRound(players),
+  }
+}
+
+/** Winners first, then hiders by how long they lasted, then hunters by catches. */
+export function rankRound(players: RoundPlayer[]): RoundPlayer[] {
+  const score = (p: RoundPlayer) => [p.won ? 1 : 0, p.survivedSec ?? -1, p.catches]
+  return [...players].sort((a, b) => {
+    const x = score(a)
+    const y = score(b)
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return y[i] - x[i]
+    return a.nickname.localeCompare(b.nickname)
+  })
+}
+
+export type TrackPoint = { player: string; at: number; position: LngLat }
+
+/** Everyone's route points for a finished round, oldest first. Empty once they are deleted. */
+export async function fetchTracks(gameId: string, round: number): Promise<TrackPoint[]> {
+  if (!supabase) return []
+  const points: TrackPoint[] = []
+  // The backend sends at most 1000 rows at a time, so ask page by page.
+  for (let from = 0; from < 20000; from += 1000) {
+    const { data, error } = await supabase
+      .from('tracks')
+      .select('player_id, at, lat, lng')
+      .eq('game_id', gameId)
+      .eq('round', round)
+      .order('at')
+      .range(from, from + 999)
+    if (error || !data) break
+    for (const t of data as { player_id: string; at: string; lat: number; lng: number }[])
+      points.push({ player: t.player_id, at: Date.parse(t.at), position: [t.lng, t.lat] })
+    if (data.length < 1000) break
+  }
+  return points
 }

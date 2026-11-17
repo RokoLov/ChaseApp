@@ -5,7 +5,9 @@ import {
   MIN_RADIUS_M,
   extentM,
   formatM,
+  insertCorner,
   isValidArea,
+  untangle,
   type Area,
   type LngLat,
 } from '../lib/geo'
@@ -24,7 +26,13 @@ export function AreaPicker({ initial, onChange }: { initial: Area | null; onChan
   const [tool, setTool] = useState<Tool>(initial?.type ?? 'circle')
   const [center, setCenter] = useState<LngLat | null>(initial?.type === 'circle' ? initial.center : null)
   const [radius, setRadius] = useState(initial?.type === 'circle' ? initial.radiusM : 150)
-  const [points, setPoints] = useState<LngLat[]>(initial?.type === 'polygon' ? initial.points : [])
+  const [points, setPointsRaw] = useState<LngLat[]>(initial?.type === 'polygon' ? untangle(initial.points) : [])
+  /** Earlier versions of the outline, so "Undo corner" works even when a corner went in the middle. */
+  const [history, setHistory] = useState<LngLat[][]>([])
+  const setPoints = (next: LngLat[]) => {
+    setHistory([...history, points])
+    setPointsRaw(next)
+  }
   /** The circle only counts once the player has placed the map somewhere on purpose. */
   const [placed, setPlaced] = useState(initial !== null)
   const wantFly = useRef(false)
@@ -89,7 +97,7 @@ export function AreaPicker({ initial, onChange }: { initial: Area | null; onChan
             if (zoom >= 13) setPlaced(true)
           }}
           onTap={(p) => {
-            if (tool === 'polygon' && points.length < 30) setPoints([...points, p])
+            if (tool === 'polygon' && points.length < 30) setPoints(insertCorner(points, p))
           }}
         />
         <button
@@ -144,8 +152,11 @@ export function AreaPicker({ initial, onChange }: { initial: Area | null; onChan
         <div className="flex gap-2">
           <button
             type="button"
-            disabled={points.length === 0}
-            onClick={() => setPoints(points.slice(0, -1))}
+            disabled={history.length === 0}
+            onClick={() => {
+              setPointsRaw(history[history.length - 1] ?? [])
+              setHistory(history.slice(0, -1))
+            }}
             className="h-10 flex-1 rounded-xl bg-raised text-sm font-semibold text-ink disabled:opacity-40"
           >
             Undo corner
@@ -175,7 +186,7 @@ export function AreaPicker({ initial, onChange }: { initial: Area | null; onChan
           ? placed
             ? 'Move the map to slide the circle. Use the slider to change its size.'
             : 'Tap “Use my location”, or zoom the map in to your play area.'
-          : 'Tap the map to place each corner of the play area.'}
+          : 'Tap the map to place each corner, in any order. CHASE joins them into a shape whose edges never cross.'}
       </p>
     </div>
   )

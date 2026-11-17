@@ -13,7 +13,10 @@ const STYLE = {
   dark: 'https://tiles.openfreemap.org/styles/dark',
 }
 
-export type MapMarker = { position: LngLat; kind: 'hunter' | 'hider' }
+export type MapMarker = { position: LngLat; kind: 'hunter' | 'hider'; /** Overrides the role colour (replay). */ color?: string }
+
+/** A line along someone's route (replay). */
+export type MapRoute = { points: LngLat[]; color: string }
 
 export type MapProps = {
   /** The play area to draw. */
@@ -30,6 +33,8 @@ export type MapProps = {
   me?: LngLat | null
   /** Other players this phone is allowed to see. */
   others?: MapMarker[]
+  /** Routes to draw under the markers. */
+  routes?: MapRoute[]
   /** Keep the whole area in view (used where the map is only for looking). */
   fitArea?: boolean
   /** Let the player move and zoom the map. */
@@ -51,11 +56,22 @@ const polygonData = (area: Area | null | undefined) => ({
       : [],
 })
 
-const pointsData = (points: { position: LngLat; kind?: string }[]) => ({
+const routesData = (routes: MapRoute[]) => ({
+  type: 'FeatureCollection' as const,
+  features: routes
+    .filter((r) => r.points.length >= 2)
+    .map((r) => ({
+      type: 'Feature' as const,
+      properties: { color: r.color },
+      geometry: { type: 'LineString' as const, coordinates: r.points },
+    })),
+})
+
+const pointsData = (points: { position: LngLat; kind?: string; color?: string }[]) => ({
   type: 'FeatureCollection' as const,
   features: points.map((p) => ({
     type: 'Feature' as const,
-    properties: { kind: p.kind ?? '' },
+    properties: p.color ? { kind: p.kind ?? '', color: p.color } : { kind: p.kind ?? '' },
     geometry: { type: 'Point' as const, coordinates: p.position },
   })),
 })
@@ -76,8 +92,11 @@ export function MapView(props: MapProps) {
   function draw() {
     const m = map.current
     if (!m || !ready.current) return
-    const { area, zone, nextZone, corners, me, others, fitArea } = latest.current
-    const set = (id: string, data: ReturnType<typeof polygonData> | ReturnType<typeof pointsData>) => {
+    const { area, zone, nextZone, corners, me, others, routes, fitArea } = latest.current
+    const set = (
+      id: string,
+      data: ReturnType<typeof polygonData> | ReturnType<typeof pointsData> | ReturnType<typeof routesData>,
+    ) => {
       const key = JSON.stringify(data)
       if (sent.current[id] === key) return
       sent.current[id] = key
@@ -87,6 +106,7 @@ export function MapView(props: MapProps) {
     set('zone', polygonData(zone))
     set('next', polygonData(nextZone))
     set('corners', pointsData((corners ?? []).map((position) => ({ position }))))
+    set('routes', routesData(routes ?? []))
     set('others', pointsData(others ?? []))
     set('me', pointsData(me ? [{ position: me }] : []))
 
@@ -142,6 +162,7 @@ export function MapView(props: MapProps) {
       if (m.getSource('area')) return
       for (const id of ['area', 'zone', 'next']) m.addSource(id, { type: 'geojson', data: polygonData(null) })
       for (const id of ['corners', 'others', 'me']) m.addSource(id, { type: 'geojson', data: pointsData([]) })
+      m.addSource('routes', { type: 'geojson', data: routesData([]) })
       m.addLayer({ id: 'area-fill', type: 'fill', source: 'area', paint: { 'fill-color': fill, 'fill-opacity': 0.18 } })
       m.addLayer({ id: 'area-line', type: 'line', source: 'area', paint: { 'line-color': line, 'line-width': 3 } })
       m.addLayer({ id: 'zone-fill', type: 'fill', source: 'zone', paint: { 'fill-color': fill, 'fill-opacity': 0.22 } })
@@ -151,6 +172,13 @@ export function MapView(props: MapProps) {
         type: 'line',
         source: 'next',
         paint: { 'line-color': warn, 'line-width': 2, 'line-dasharray': [2, 2] },
+      })
+      m.addLayer({
+        id: 'routes',
+        type: 'line',
+        source: 'routes',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': ['get', 'color'], 'line-width': 3, 'line-opacity': 0.75 },
       })
       m.addLayer({
         id: 'corners',
@@ -164,7 +192,7 @@ export function MapView(props: MapProps) {
         source: 'others',
         paint: {
           'circle-radius': 7,
-          'circle-color': ['match', ['get', 'kind'], 'hunter', hunter, fill],
+          'circle-color': ['case', ['has', 'color'], ['get', 'color'], ['match', ['get', 'kind'], 'hunter', hunter, fill]],
           'circle-stroke-color': '#0b0f14',
           'circle-stroke-width': 2,
         },

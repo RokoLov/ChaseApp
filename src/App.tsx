@@ -6,6 +6,8 @@ import Home from './pages/Home'
 import Join from './pages/Join'
 import Lobby from './pages/Lobby'
 import Profile from './pages/Profile'
+import Replay from './pages/Replay'
+import Results from './pages/Results'
 import Settings from './pages/Settings'
 import Welcome from './pages/Welcome'
 
@@ -42,6 +44,8 @@ export default function App() {
           <Route path="/join/:code" element={<InviteLink />} />
           <Route path="/lobby/:code" element={<Lobby />} />
           <Route path="/game/:code" element={<Game />} />
+          <Route path="/results/:gameId/:round" element={<Results />} />
+          <Route path="/replay/:gameId/:round" element={<Replay />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
