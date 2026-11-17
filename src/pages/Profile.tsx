@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { FriendSheet } from '../components/Friends'
 import { PhotoPicker } from '../components/PhotoPicker'
 import { Avatar, BackHeader, Button, Note, Screen, SectionLabel, Tile } from '../components/ui'
-import { useProfile } from '../lib/profile'
+import { useProfile, type Friend } from '../lib/profile'
 
 function formatTime(sec: number) {
   const m = Math.floor(sec / 60)
@@ -17,6 +18,9 @@ export default function Profile() {
   const [nickname, setNickname] = useState(profile?.nickname ?? '')
   const [photo, setPhoto] = useState<string | null>(profile?.photo ?? null)
   const [busy, setBusy] = useState(false)
+  const [friend, setFriend] = useState<Friend | null>(null)
+  const sync = useProfile((s) => s.sync)
+  useEffect(() => void sync(), [sync])
 
   if (!profile) return null
   const { stats, friends } = profile
@@ -89,20 +93,30 @@ export default function Profile() {
       ) : (
         <ul className="flex flex-col gap-2.5">
           {friends.map((f) => (
-            <li key={f.id} className="flex items-center gap-2.5">
-              <Avatar name={f.nickname} photo={f.photo} size={38} />
-              <div className="flex flex-col">
-                <span className="font-display font-medium">{f.nickname}</span>
-                <span className="text-xs text-muted">{f.gamesTogether} games together</span>
-              </div>
+            <li key={f.id}>
+              <button type="button" onClick={() => setFriend(f)} className="flex w-full items-center gap-2.5 text-left">
+                <Avatar name={f.nickname} photo={f.photo} size={38} />
+                <div className="flex flex-col">
+                  <span className="font-display font-medium">{f.nickname}</span>
+                  <span className="text-xs text-muted">
+                    {f.gamesTogether} {f.gamesTogether === 1 ? 'game' : 'games'} together
+                  </span>
+                </div>
+                <span className="ml-auto text-xl text-muted">›</span>
+              </button>
             </li>
           ))}
         </ul>
       )}
 
       <div className="mt-auto">
-        <Note>Saved on this phone. Clearing browser data resets it.</Note>
+        <Note>
+          {profile.storedIn === 'backend'
+            ? 'Stats and friends are saved online for this phone. Clearing browser data resets them.'
+            : 'Saved on this phone. Clearing browser data resets it.'}
+        </Note>
       </div>
+      {friend && <FriendSheet friend={friend} onClose={() => setFriend(null)} />}
     </Screen>
   )
 }

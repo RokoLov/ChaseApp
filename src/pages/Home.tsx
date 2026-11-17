@@ -1,15 +1,23 @@
+import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { FriendSheet } from '../components/Friends'
 import { MapView } from '../components/Map'
 import { Avatar, LinkButton, Screen, SectionLabel } from '../components/ui'
 import { useArena } from '../lib/arena'
 import { extentM, formatM } from '../lib/geo'
-import { useProfile } from '../lib/profile'
+import { REPLAY_KEEP_MS, useHistory } from '../lib/history'
+import { useProfile, type Friend } from '../lib/profile'
 
 export default function Home() {
   const profile = useProfile((s) => s.profile)
   const lastArea = useArena((s) => s.lastArea)
   const navigate = useNavigate()
+  const sync = useProfile((s) => s.sync)
+  const lastGame = useHistory((s) => s.lastGame)
+  const [friend, setFriend] = useState<Friend | null>(null)
+  useEffect(() => void sync(), [sync])
   if (!profile) return null
+  const replayKept = lastGame !== null && Date.now() - Date.parse(lastGame.endedAt) < REPLAY_KEEP_MS
 
   return (
     <Screen>
@@ -35,12 +43,40 @@ export default function Home() {
       ) : (
         <div className="flex gap-4 overflow-x-auto">
           {profile.friends.map((f) => (
-            <div key={f.id} className="flex flex-col items-center gap-1.5">
+            <button key={f.id} type="button" onClick={() => setFriend(f)} className="flex flex-col items-center gap-1.5">
               <Avatar name={f.nickname} photo={f.photo} size={54} />
               <span className="text-xs font-medium text-muted">{f.nickname}</span>
-            </div>
+            </button>
           ))}
         </div>
+      )}
+
+      {lastGame && (
+        <>
+          <SectionLabel>Last game</SectionLabel>
+          <div className="flex items-center gap-2 rounded-[20px] bg-surface p-4">
+            <div className="flex flex-col">
+              <span className="font-display font-medium">{lastGame.title}</span>
+              <span className="text-xs text-muted">
+                {new Date(lastGame.endedAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}
+              </span>
+            </div>
+            <Link
+              to={`/results/${lastGame.gameId}/${lastGame.round}`}
+              className="ml-auto rounded-full bg-raised px-3 py-1.5 text-xs font-semibold text-ink"
+            >
+              Results
+            </Link>
+            {replayKept && (
+              <Link
+                to={`/replay/${lastGame.gameId}/${lastGame.round}`}
+                className="rounded-full bg-brand px-3 py-1.5 text-xs font-semibold text-on-brand"
+              >
+                Replay
+              </Link>
+            )}
+          </div>
+        </>
       )}
 
       <SectionLabel>Last arena</SectionLabel>
@@ -68,6 +104,7 @@ export default function Home() {
           The last play area you used will appear here.
         </p>
       )}
+      {friend && <FriendSheet friend={friend} onClose={() => setFriend(null)} />}
     </Screen>
   )
 }

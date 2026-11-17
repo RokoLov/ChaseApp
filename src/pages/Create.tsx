@@ -22,8 +22,10 @@ const titles = { 1: 'Choose a mode', 2: 'Draw the play area', 3: 'Pick the rules
 
 export default function Create() {
   const navigate = useNavigate()
-  /** "Play here again" on Home passes the last play area along. */
-  const startArea = (useRoute().state as { area?: Area } | null)?.area ?? null
+  /** "Play here again" passes the last play area along; a friend's "Invite" passes their name. */
+  const routeState = useRoute().state as { area?: Area; invite?: string } | null
+  const startArea = routeState?.area ?? null
+  const invite = routeState?.invite
   const setLastArea = useArena((s) => s.setLastArea)
   const [step, setStep] = useState<1 | 2 | 3>(1)
   const [mode, setMode] = useState<Mode>('battle_royale')
@@ -50,7 +52,7 @@ export default function Create() {
     try {
       const code = await createGame(mode, preset, rules, area)
       setLastArea(area)
-      navigate(`/lobby/${code}`, { replace: true })
+      navigate(`/lobby/${code}`, { replace: true, state: invite ? { invite } : undefined })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The game could not be created.')
       setBusy(false)

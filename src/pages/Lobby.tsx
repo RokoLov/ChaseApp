@@ -1,6 +1,6 @@
 import QRCode from 'qrcode'
 import { useEffect, useState } from 'react'
-import { Navigate, useNavigate, useParams } from 'react-router-dom'
+import { Navigate, useLocation as useRoute, useNavigate, useParams } from 'react-router-dom'
 import { MapView } from '../components/Map'
 import { Avatar, Button, LinkButton, Note, Screen } from '../components/ui'
 import { StartSheet } from '../components/StartSheet'
@@ -38,6 +38,9 @@ export default function Lobby() {
   const [shared, setShared] = useState('')
   const [starting, setStarting] = useState(false)
   const { location, start: startLocation } = useLocation()
+  /** Set when this lobby was made from a friend's "Invite to a new game". */
+  const invite = (useRoute().state as { invite?: string } | null)?.invite
+  const [invited, setInvited] = useState(false)
 
   const link = `${window.location.origin}/join/${code.toUpperCase()}`
 
@@ -85,6 +88,7 @@ export default function Lobby() {
     try {
       if (navigator.share) {
         await navigator.share({ title: 'CHASE', text, url: link })
+        setInvited(true)
       } else {
         await navigator.clipboard.writeText(link)
         setShared('Link copied')
@@ -135,6 +139,16 @@ export default function Lobby() {
           </button>
         </div>
         {shared && <span className="text-xs text-muted">{shared}</span>}
+        {invite && !invited && players.length < 2 && (
+          <button
+            type="button"
+            onClick={share}
+            className="mt-1 flex items-center gap-2 rounded-xl bg-brand/15 px-3 py-2.5 text-left text-sm font-semibold text-brand-ink"
+          >
+            Send {invite} the invite link
+            <span className="ml-auto rounded-full bg-brand px-2.5 py-1 text-xs text-on-brand">Share</span>
+          </button>
+        )}
         {showQr && qr && (
           <div className="mt-2 flex flex-col items-center gap-2">
             <img src={qr} alt={`QR code for game ${game.code}`} className="h-56 w-56 rounded-xl bg-white p-2" />

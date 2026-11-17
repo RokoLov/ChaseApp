@@ -25,6 +25,10 @@ type ProfileState = {
   resetProfile: () => Promise<void>
   /** Make sure this phone is signed in to the backend. Online play needs it. */
   ensureBackend: () => Promise<boolean>
+  /** Fetch the latest stats and friends from the backend. Keeps the phone copy if offline. */
+  sync: () => Promise<void>
+  addFriend: (friend: Omit<Friend, 'gamesTogether'>) => Promise<void>
+  removeFriend: (id: string) => Promise<void>
 }
 
 const emptyStats: Stats = { games: 0, wins: 0, catches: 0, bestSurvivalSec: 0 }
@@ -105,6 +109,49 @@ export const useProfile = create<ProfileState>()(
         if (!(await saveToBackend(userId, current.nickname, photo))) return false
         set({ profile: { ...current, id: userId, photo, storedIn: 'backend' } })
         return true
+      },
+
+      sync: async () => {
+        const current = get().profile
+        if (!supabase || !current || current.storedIn !== 'backend') return
+        const [{ data: me }, { data: friends, error }] = await Promise.all([
+          supabase.from('players').select('games, wins, catches, best_survival_sec').eq('id', current.id).maybeSingle(),
+          supabase.rpc('my_friends'),
+        ])
+        const latest = get().profile
+        if (!latest || latest.id !== current.id) return
+        const row = me as { games: number; wins: number; catches: number; best_survival_sec: number } | null
+        set({
+          profile: {
+            ...latest,
+            stats: row
+              ? { games: row.games, wins: row.wins, catches: row.catches, bestSurvivalSec: row.best_survival_sec }
+              : latest.stats,
+            friends: error
+              ? latest.friends
+              : ((friends ?? []) as { id: string; nickname: string; photo_url: string | null; games_together: number }[]).map((f) => ({
+                  id: f.id,
+                  nickname: f.nickname,
+                  photo: f.photo_url,
+                  gamesTogether: f.games_together,
+                })),
+          },
+        })
+      },
+
+      addFriend: async (friend) => {
+        const current = get().profile
+        if (!current || current.friends.some((f) => f.id === friend.id)) return
+        set({ profile: { ...current, friends: [{ ...friend, gamesTogether: 1 }, ...current.friends] } })
+        if (supabase) await supabase.from('friendships').insert({ player_id: current.id, friend_id: friend.id })
+        await get().sync()
+      },
+
+      removeFriend: async (id) => {
+        const current = get().profile
+        if (!current) return
+        set({ profile: { ...current, friends: current.friends.filter((f) => f.id !== id) } })
+        if (supabase) await supabase.from('friendships').delete().eq('player_id', current.id).eq('friend_id', id)
       },
 
       resetProfile: async () => {
