@@ -3,7 +3,7 @@
  * time and rules, so every phone gets the same answer without asking the backend.
  * The backend uses the same formulas (see hide_end and get_reveal in supabase/schema.sql).
  */
-import { contains, distanceM, distanceToAreaM, type Area, type LngLat } from './geo.ts'
+import { contains, destination, distanceM, distanceToAreaM, type Area, type LngLat } from './geo.ts'
 import type { BattleRoyaleRules } from './rules.ts'
 
 /** How long hunters can see hiders after a zone shrink. */
@@ -59,19 +59,56 @@ function areaRadius(area: Area): number {
   return Math.max(...area.points.map((p) => distanceM(c, p)))
 }
 
+/** A repeatable random number generator: the same seed gives the same numbers on every phone. */
+function seeded(seed: number) {
+  let t = seed >>> 0
+  return () => {
+    t = (t + 0x6d2b79f5) >>> 0
+    let r = Math.imul(t ^ (t >>> 15), 1 | t)
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296
+  }
+}
+
 /**
- * The safe zone at a stage: a circle around the middle of the play area that gets
- * smaller in equal steps. Stage 0 has no circle: the whole play area is safe.
+ * The safe zone at a stage. Stage 0 has no circle: the whole play area is safe.
+ * With a seed, the game picks a random final spot anywhere in the play area (equally
+ * likely near an edge as in the middle) and every circle slides toward it as it shrinks,
+ * each one still fitting inside the one before. Every phone gets the same circles from
+ * the same seed. Without a seed (games from before this rule) it shrinks toward the middle.
  */
-export function zoneCircle(area: Area, stage: number, stages: number): { type: 'circle'; center: LngLat; radiusM: number } | null {
+export function zoneCircle(
+  area: Area,
+  stage: number,
+  stages: number,
+  seed: number | null = null,
+): { type: 'circle'; center: LngLat; radiusM: number } | null {
   if (stage <= 0) return null
-  const radiusM = Math.max(MIN_ZONE_M, areaRadius(area) * (1 - stage / (stages + 1)))
-  return { type: 'circle', center: areaCenter(area), radiusM }
+  const full = areaRadius(area)
+  const radiusAt = (k: number) => Math.max(MIN_ZONE_M, full * (1 - k / (stages + 1)))
+  const middle = areaCenter(area)
+  if (seed === null) return { type: 'circle', center: middle, radiusM: radiusAt(stage) }
+
+  const random = seeded(seed)
+  const reach = full - radiusAt(stages)
+  let target = middle
+  for (let attempt = 0; attempt < 12; attempt++) {
+    // sqrt spreads the spots evenly over the area instead of bunching them in the middle.
+    const candidate = destination(middle, reach * Math.sqrt(random()), random() * 360)
+    if (contains(area, candidate)) {
+      target = candidate
+      break
+    }
+  }
+  // Slide from the middle to the target in step with the shrinking radius.
+  const t = reach > 0 ? (full - radiusAt(stage)) / reach : 0
+  const center: LngLat = [middle[0] + (target[0] - middle[0]) * t, middle[1] + (target[1] - middle[1]) * t]
+  return { type: 'circle', center, radiusM: radiusAt(stage) }
 }
 
 /** Metres to safety: 0 when the position is inside both the play area and the current zone. */
-export function distanceToSafeM(area: Area, stage: number, stages: number, p: LngLat): number {
-  const zone = zoneCircle(area, stage, stages)
+export function distanceToSafeM(area: Area, stage: number, stages: number, p: LngLat, seed: number | null = null): number {
+  const zone = zoneCircle(area, stage, stages, seed)
   const toArea = distanceToAreaM(area, p)
   if (!zone) return toArea
   return Math.max(toArea, contains(zone, p) ? 0 : distanceM(zone.center, p) - zone.radiusM)

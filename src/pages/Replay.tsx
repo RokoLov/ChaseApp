@@ -70,9 +70,13 @@ function Player({ round, tracks }: { round: Round; tracks: TrackPoint[] }) {
 
   // The moments worth jumping to.
   const moments: Moment[] = useMemo(() => {
-    const list: Moment[] = [{ at: tl.hideEnd, text: 'Hunters released' }]
-    tl.shrinks.forEach((s, i) => s < end && list.push({ at: s, text: `Zone shrinks (${i + 1} of ${tl.shrinks.length})` }))
+    const sardines = round.mode === 'sardines'
+    const list: Moment[] = [{ at: tl.hideEnd, text: sardines ? 'The search starts' : 'Hunters released' }]
+    tl.shrinks.forEach(
+      (s, i) => s < end && list.push({ at: s, text: `${sardines ? 'Hint shrinks' : 'Zone shrinks'} (${i + 1} of ${tl.shrinks.length})` }),
+    )
     for (const p of round.players) {
+      if (p.foundSec !== null) list.push({ at: Date.parse(round.huntAt) + p.foundSec * 1000, text: `${p.nickname} found the group` })
       if (!p.outAt) continue
       const at = Date.parse(p.outAt)
       if (p.outReason === 'caught') list.push({ at, text: `${nameOf(p.caughtBy)} caught ${p.nickname}` })
@@ -117,7 +121,15 @@ function Player({ round, tracks }: { round: Round; tracks: TrackPoint[] }) {
     const hunter = p.startRole === 'hunter' || (p.outAt !== null && Date.parse(p.outAt) <= t)
     return last ? [{ position: last, kind: hunter ? ('hunter' as const) : ('hider' as const), color: color[p.id] }] : []
   })
-  const zone = round.area ? zoneCircle(round.area, stageAt(tl, t), round.settings.zoneStages) : null
+  const zone =
+    round.area && round.mode !== 'sardines' ? zoneCircle(round.area, stageAt(tl, t), round.settings.zoneStages, round.seed) : null
+  const statusAt = (p: Round['players'][number]) => {
+    if (round.mode === 'sardines') {
+      if (p.startRole === 'hider') return 'hider'
+      return p.foundSec !== null && Date.parse(round.huntAt) + p.foundSec * 1000 <= t ? 'in the group' : 'searching'
+    }
+    return p.startRole === 'hunter' || (p.outAt !== null && Date.parse(p.outAt) <= t) ? 'hunter' : 'hider'
+  }
 
   return (
     <Screen>
@@ -166,12 +178,11 @@ function Player({ round, tracks }: { round: Round; tracks: TrackPoint[] }) {
 
       <ul className="flex flex-wrap gap-x-4 gap-y-2">
         {round.players.map((p) => {
-          const hunter = p.startRole === 'hunter' || (p.outAt !== null && Date.parse(p.outAt) <= t)
           return (
             <li key={p.id} className="flex items-center gap-1.5 text-sm">
               <span className="h-3 w-3 rounded-full" style={{ background: color[p.id] }} />
               <span className="font-medium">{p.nickname}</span>
-              <span className="text-xs text-muted">{hunter ? 'hunter' : 'hider'}</span>
+              <span className="text-xs text-muted">{statusAt(p)}</span>
             </li>
           )
         })}

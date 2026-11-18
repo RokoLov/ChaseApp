@@ -8,7 +8,7 @@ import { kickPlayer, leaveGame, setReady, useLobby } from '../lib/games'
 import { distanceToAreaM, extentM, formatM } from '../lib/geo'
 import { locationHelp, useLocation } from '../lib/location'
 import { useProfile } from '../lib/profile'
-import { modeName, presetLabel, type Mode } from '../lib/rules'
+import { modeName, rulesSummary, type Mode } from '../lib/rules'
 
 const modeBg: Record<Mode, string> = {
   battle_royale: 'bg-mode-br',
@@ -226,7 +226,7 @@ export default function Lobby() {
       )}
 
       <div className="rounded-xl bg-surface px-3.5 py-3 text-[13px] text-muted">
-        {presetLabel(game.preset)} · {game.settings.gameMin} min · {game.settings.zoneStages} zone stages
+        {rulesSummary(game.mode, game.preset, game.settings)}
         {game.area ? ` · ${formatM(extentM(game.area))} area` : ''}
       </div>
 

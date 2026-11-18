@@ -56,10 +56,17 @@ export function CodeSheet({ code, onClose }: { code: string; onClose: () => void
 export function CatchSheet({
   onSubmit,
   onClose,
+  title = 'Catch a hider',
+  confirm = 'Confirm catch',
+  whose = 'hider’s',
 }: {
   /** Try the code. Resolves on success, rejects with a message for the player. */
   onSubmit: (code: string) => Promise<void>
   onClose: () => void
+  title?: string
+  confirm?: string
+  /** Whose code is scanned, for the help text. */
+  whose?: string
 }) {
   const video = useRef<HTMLVideoElement>(null)
   const [typed, setTyped] = useState('')
@@ -114,14 +121,14 @@ export function CatchSheet({
   }, [])
 
   return (
-    <Sheet title="Catch a hider" onClose={onClose}>
+    <Sheet title={title} onClose={onClose}>
       <div className="relative aspect-square w-full overflow-hidden rounded-2xl bg-raised">
         <video ref={video} className="h-full w-full object-cover" muted playsInline />
         {camera !== 'on' && (
           <p className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-muted">
             {camera === 'starting'
               ? 'Starting the camera…'
-              : 'The camera is not available. Type the hider’s code instead.'}
+              : `The camera is not available. Type the ${whose} code instead.`}
           </p>
         )}
       </div>
@@ -145,7 +152,7 @@ export function CatchSheet({
       )}
       <div className="mt-auto">
         <Button onClick={() => void submit(typed)} disabled={typed.length !== 4}>
-          Confirm catch
+          {confirm}
         </Button>
       </div>
     </Sheet>

@@ -20,6 +20,7 @@
   --c-mode-br: #ff5a3c;
   --c-mode-br-ink: #ff5a3c;
   --c-mode-sar: #35d0ff;
+  --c-mode-sar-ink: #35d0ff;
   --c-mode-cnr: #8b7cff;
   color-scheme: dark;
 }
@@ -36,6 +37,7 @@
   --c-warn-ink: #8a5a00;
   --c-danger-ink: #c4202f;
   --c-mode-br-ink: #c93a1e;
+  --c-mode-sar-ink: #0a7fa8;
   color-scheme: light;
 }
 
@@ -57,6 +59,7 @@
   --color-mode-br: var(--c-mode-br);
   --color-mode-br-ink: var(--c-mode-br-ink);
   --color-mode-sar: var(--c-mode-sar);
+  --color-mode-sar-ink: var(--c-mode-sar-ink);
   --color-mode-cnr: var(--c-mode-cnr);
   --font-display: "Space Grotesk Variable", system-ui, sans-serif;
   --font-sans: "Inter Variable", system-ui, sans-serif;

@@ -39,3 +39,12 @@ Settled decisions, so they are not reopened. Newest at the bottom.
 29. Polygon corners can be tapped in any order; CHASE joins them so the edges never cross
 30. Hide time ends early once every hider taps "I'm hidden". Hunters still cannot catch during hide time, so no one can be caught before they have had the chance to hide
 31. During a game the map opens fullscreen, with the timer, role, alerts, counts and the main action in a panel at the bottom
+
+## Milestone 6: Sardines (18 Nov 2026)
+
+32. The Battle Royale zone shrinks toward a random spot anywhere in the play area (edges included), the same on every phone
+33. Settings shows the version and milestone (version 0.N = milestone N), updated with every milestone
+34. Sardines: the hider taps "I'm hidden" to start the search early, like in Battle Royale
+35. Sardines: a seeker joins by scanning the hider's code or the code of anyone already in the group
+36. Sardines: seekers get a hint circle that always contains the hider, placed at random around them and shrinking at set times; the hider's phone warns them if they move more than 20 m from their spot
+37. Sardines winners: when everyone finds the group, all but the last finder win (with a single seeker, finding the hider wins); when time runs out, the hider and everyone who found them win; if the hider leaves, the game ends with no winner

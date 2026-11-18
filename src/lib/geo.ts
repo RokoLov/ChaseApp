@@ -23,7 +23,7 @@ export function distanceM(a: LngLat, b: LngLat): number {
 }
 
 /** The position reached by going `metres` from `from` in compass direction `bearingDeg`. */
-function destination(from: LngLat, metres: number, bearingDeg: number): LngLat {
+export function destination(from: LngLat, metres: number, bearingDeg: number): LngLat {
   const d = metres / R
   const b = rad(bearingDeg)
   const lat1 = rad(from[1])

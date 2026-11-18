@@ -213,7 +213,7 @@ with sync_playwright() as p:
         page.click("text=Catch a hider")
         page.fill("input[aria-label=\"Hider's code\"]", "1111")
         page.click("text=Confirm catch")
-        page.wait_for_selector("text=That code does not belong to a hider")
+        page.wait_for_selector("text=That code is not right")
         shot("g9-catch-wrong-code")
         page.fill("input[aria-label=\"Hider's code\"]", "4729")
         page.wait_for_timeout(1600)

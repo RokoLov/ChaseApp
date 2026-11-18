@@ -1171,3 +1171,489 @@ revoke execute on function public.is_round_member(uuid, int) from public, anon;
 revoke execute on function public.my_friends() from public, anon;
 grant execute on function public.is_round_member(uuid, int) to authenticated;
 grant execute on function public.my_friends() to authenticated;
+
+-- ───────────────────────── Milestone 6: Sardines, and a random Battle Royale zone ─────────────────────────
+
+-- A random number picked at each start. Every phone uses it to place the shrinking zone
+-- the same way (src/lib/br.ts), and the backend uses it to place the Sardines hint circle.
+alter table public.games add column seed int;
+alter table public.game_rounds add column seed int;
+
+-- Sardines roles: one 'hider'; everyone else is a 'seeker' until they find the group.
+alter table public.game_players drop constraint game_players_role_check;
+alter table public.game_players add constraint game_players_role_check check (role in ('hider', 'hunter', 'seeker'));
+alter table public.game_players add column found_at timestamptz, add column found_rank int;
+
+alter table public.events drop constraint events_type_check;
+alter table public.events add constraint events_type_check
+  check (type in ('start', 'caught', 'zone', 'signal', 'end', 'release', 'found'));
+alter table public.games drop constraint games_end_reason_check;
+alter table public.games add constraint games_end_reason_check
+  check (end_reason in ('last_hider', 'all_caught', 'time', 'all_found', 'hider_left'));
+alter table public.round_players drop constraint round_players_start_role_check;
+alter table public.round_players add constraint round_players_start_role_check check (start_role in ('hider', 'hunter', 'seeker'));
+-- Sardines: the order a seeker found the group, and how long into the search it took.
+alter table public.round_players add column found_rank int, add column found_sec int;
+
+-- Where the Sardines hider settled when hide time ended. No phone can read this table;
+-- searchers only get a hint circle around it, the hider only their own spot.
+create table public.sardine_anchors (
+  game_id uuid not null references public.games (id) on delete cascade,
+  round int not null,
+  lat double precision not null,
+  lng double precision not null,
+  at timestamptz not null default now(),
+  primary key (game_id, round)
+);
+alter table public.sardine_anchors enable row level security;
+
+-- The play area's radius in metres (for a polygon: centre to the farthest corner).
+create function public.area_radius_m(p_area jsonb)
+returns double precision
+language sql immutable set search_path = ''
+as $$
+  select case
+    when p_area->>'type' = 'circle' then (p_area->>'radiusM')::double precision
+    else (
+      with pts as (
+        select (p->>0)::double precision as lng, (p->>1)::double precision as lat
+        from jsonb_array_elements(p_area->'points') p
+      ), c as (select avg(lng) as lng, avg(lat) as lat from pts)
+      select max(public.distance_m(c.lat, c.lng, pts.lat, pts.lng)) from pts, c
+    )
+  end;
+$$;
+
+-- The host starts the game. Battle Royale: hunters at random or the host's pick.
+-- Sardines: one hider, at random or the host's pick; everyone else seeks.
+create or replace function public.start_game(p_game uuid, p_hunters uuid[] default null)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_uid uuid := (select auth.uid());
+  v_game public.games%rowtype;
+  v_n int;
+  v_k int;
+begin
+  select * into v_game from public.games where id = p_game for update;
+  if not found or v_game.host_id <> v_uid or v_game.status <> 'lobby' then
+    raise exception 'NOT_HOST';
+  end if;
+  select count(*) into v_n from public.game_players where game_id = p_game;
+  if v_n < 2 then raise exception 'NEED_TWO_PLAYERS'; end if;
+  if exists (select 1 from public.game_players where game_id = p_game and not ready) then
+    raise exception 'NOT_ALL_READY';
+  end if;
+  if p_hunters is not null and cardinality(p_hunters) > 0 and exists (
+    select 1 from unnest(p_hunters) h
+    where h not in (select player_id from public.game_players where game_id = p_game)
+  ) then
+    raise exception 'BAD_HUNTERS';
+  end if;
+
+  if v_game.mode = 'sardines' then
+    update public.game_players set
+      role = 'seeker', hunter_since = null, hunter_reason = null, caught_by = null,
+      catches = 0, last_seen = now(), hidden = false, found_at = null, found_rank = null
+    where game_id = p_game;
+    if p_hunters is not null and cardinality(p_hunters) > 0 then
+      if cardinality(p_hunters) <> 1 then raise exception 'BAD_HUNTERS'; end if;
+      update public.game_players set role = 'hider' where game_id = p_game and player_id = p_hunters[1];
+    else
+      update public.game_players set role = 'hider'
+        where game_id = p_game and player_id = (
+          select player_id from public.game_players where game_id = p_game order by random() limit 1
+        );
+    end if;
+    v_k := v_n - 1; -- seekers
+  else
+    update public.game_players set
+      role = 'hider', hunter_since = null, hunter_reason = null, caught_by = null,
+      catches = 0, last_seen = now(), hidden = false, found_at = null, found_rank = null
+    where game_id = p_game;
+    if p_hunters is not null and cardinality(p_hunters) > 0 then
+      v_k := cardinality(p_hunters);
+      if v_k > v_n - 1 then raise exception 'BAD_HUNTERS'; end if;
+      update public.game_players set role = 'hunter', hunter_since = now(), hunter_reason = 'start'
+        where game_id = p_game and player_id = any (p_hunters);
+    else
+      v_k := coalesce(nullif((v_game.settings->>'hunters')::int, 0), case when v_n >= 8 then 2 else 1 end);
+      v_k := greatest(1, least(v_k, v_n - 1));
+      update public.game_players set role = 'hunter', hunter_since = now(), hunter_reason = 'start'
+        where game_id = p_game and player_id in (
+          select player_id from public.game_players where game_id = p_game order by random() limit v_k
+        );
+    end if;
+  end if;
+
+  delete from public.catch_codes where game_id = p_game;
+  insert into public.catch_codes (game_id, player_id, code)
+  select p_game, pl.player_id, c.code
+  from (select player_id, row_number() over () as rn from public.game_players where game_id = p_game) pl
+  join (select n::text as code, row_number() over (order by random()) as rn from generate_series(1000, 9999) n) c
+    on c.rn = pl.rn;
+
+  delete from public.positions where game_id = p_game;
+  delete from public.events where game_id = p_game;
+  update public.games set
+    status = 'running', started_at = now(), ended_at = null, winners = '{}', end_reason = null,
+    initial_hiders = case when v_game.mode = 'sardines' then 1 else v_n - v_k end,
+    hide_ended_at = null, round = round + 1, seed = floor(random() * 2147483647)::int
+  where id = p_game;
+  insert into public.events (game_id, type) values (p_game, 'start');
+end;
+$$;
+
+create or replace function public.reset_game(p_game uuid)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  update public.games set
+    status = 'lobby', started_at = null, ended_at = null, winners = '{}', end_reason = null,
+    initial_hiders = null, hide_ended_at = null
+  where id = p_game and host_id = (select auth.uid()) and status = 'ended';
+  if not found then raise exception 'NOT_HOST'; end if;
+  update public.game_players set
+    ready = false, role = null, hunter_since = null, hunter_reason = null, caught_by = null, catches = 0,
+    hidden = false, found_at = null, found_rank = null
+  where game_id = p_game;
+  delete from public.positions where game_id = p_game;
+  delete from public.catch_codes where game_id = p_game;
+  delete from public.events where game_id = p_game;
+end;
+$$;
+
+-- Battle Royale's "is it over?" check now ignores Sardines games.
+create or replace function public.finish_if_done(p_game uuid)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_left int;
+  v_initial int;
+begin
+  select initial_hiders into v_initial from public.games
+    where id = p_game and status = 'running' and mode = 'battle_royale';
+  if not found then return; end if;
+  select count(*) into v_left from public.game_players where game_id = p_game and role = 'hider';
+  if v_left = 0 or (v_left = 1 and v_initial >= 2) then
+    update public.games set
+      status = 'ended',
+      ended_at = now(),
+      winners = array(select player_id from public.game_players where game_id = p_game and role = 'hider'),
+      end_reason = case when v_left = 0 then 'all_caught' else 'last_hider' end
+    where id = p_game;
+    insert into public.events (game_id, type) values (p_game, 'end');
+    perform public.record_round(p_game);
+  end if;
+end;
+$$;
+
+-- Sardines ends when every seeker has found the group, or when the hider leaves.
+-- The last seeker to find the group loses; with only one seeker, finding the hider wins.
+create function public.finish_sardines(p_game uuid)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_seekers int;
+  v_last uuid;
+begin
+  perform 1 from public.games where id = p_game and status = 'running' and mode = 'sardines';
+  if not found then return; end if;
+  if not exists (select 1 from public.game_players where game_id = p_game and role = 'hider') then
+    update public.games set status = 'ended', ended_at = now(), end_reason = 'hider_left', winners = '{}'
+      where id = p_game;
+    insert into public.events (game_id, type) values (p_game, 'end');
+    perform public.record_round(p_game);
+    return;
+  end if;
+  if exists (select 1 from public.game_players where game_id = p_game and role = 'seeker' and found_at is null) then
+    return;
+  end if;
+  select count(*) into v_seekers from public.game_players where game_id = p_game and role = 'seeker';
+  if v_seekers = 0 then return; end if;
+  select player_id into v_last from public.game_players
+    where game_id = p_game and role = 'seeker' order by found_rank desc limit 1;
+  update public.games set
+    status = 'ended', ended_at = now(), end_reason = 'all_found',
+    winners = case when v_seekers = 1 then array[v_last]
+                   else array(select player_id from public.game_players where game_id = p_game and player_id <> v_last) end
+  where id = p_game;
+  insert into public.events (game_id, type) values (p_game, 'end');
+  perform public.record_round(p_game);
+end;
+$$;
+
+-- A seeker who found the group enters the code of the hider (or of anyone already in the group).
+create function public.join_sardine(p_game uuid, p_code text)
+returns uuid
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_uid uuid := (select auth.uid());
+  v_game public.games%rowtype;
+  v_target uuid;
+  v_hider uuid;
+  v_far boolean;
+begin
+  select * into v_game from public.games where id = p_game for update;
+  if not found or v_game.status <> 'running' or v_game.mode <> 'sardines' then raise exception 'NOT_RUNNING'; end if;
+  if not exists (
+    select 1 from public.game_players where game_id = p_game and player_id = v_uid and role = 'seeker' and found_at is null
+  ) then raise exception 'NOT_SEEKER'; end if;
+  if now() < public.hide_end(v_game) then raise exception 'HIDE_TIME'; end if;
+  select cc.player_id into v_target
+  from public.catch_codes cc
+  join public.game_players gp on gp.game_id = cc.game_id and gp.player_id = cc.player_id
+  where cc.game_id = p_game and cc.code = trim(p_code)
+    and (gp.role = 'hider' or (gp.role = 'seeker' and gp.found_at is not null));
+  if v_target is null then raise exception 'WRONG_CODE'; end if;
+
+  select public.distance_m(a.lat, a.lng, b.lat, b.lng) > 250 into v_far
+  from public.positions a, public.positions b
+  where a.game_id = p_game and a.player_id = v_uid
+    and b.game_id = p_game and b.player_id = v_target
+    and a.updated_at > now() - interval '90 seconds'
+    and b.updated_at > now() - interval '90 seconds';
+  if coalesce(v_far, false) then raise exception 'TOO_FAR'; end if;
+
+  update public.game_players set
+    found_at = now(),
+    found_rank = 1 + (select count(*) from public.game_players where game_id = p_game and found_at is not null)
+  where game_id = p_game and player_id = v_uid;
+  select player_id into v_hider from public.game_players where game_id = p_game and role = 'hider';
+  insert into public.events (game_id, type, actor, target) values (p_game, 'found', v_uid, v_hider);
+  perform public.finish_sardines(p_game);
+  return v_target;
+end;
+$$;
+
+-- The hider's spot, fixed the first time anyone asks after hide time ends.
+create function public.sardine_anchor(p_game uuid)
+returns public.sardine_anchors
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_game public.games%rowtype;
+  v_anchor public.sardine_anchors%rowtype;
+begin
+  select * into v_game from public.games where id = p_game;
+  if not found or v_game.status <> 'running' or v_game.mode <> 'sardines' then return null; end if;
+  if now() < public.hide_end(v_game) then return null; end if;
+  select * into v_anchor from public.sardine_anchors where game_id = p_game and round = v_game.round;
+  if found then return v_anchor; end if;
+  insert into public.sardine_anchors (game_id, round, lat, lng)
+  select p_game, v_game.round, p.lat, p.lng
+  from public.positions p
+  join public.game_players gp on gp.game_id = p.game_id and gp.player_id = p.player_id
+  where p.game_id = p_game and gp.role = 'hider'
+  on conflict do nothing;
+  select * into v_anchor from public.sardine_anchors where game_id = p_game and round = v_game.round;
+  if found then return v_anchor; end if;
+  return null;
+end;
+$$;
+
+-- Searchers' hint: a circle that always contains the hider's spot, placed at random
+-- around it and shrinking at set times. Stage 0 starts when the search starts.
+create function public.get_hint(p_game uuid)
+returns table (lat double precision, lng double precision, radius_m double precision, stage int)
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_game public.games%rowtype;
+  v_anchor public.sardine_anchors%rowtype;
+  v_hide_end timestamptz;
+  v_end timestamptz;
+  v_stages int;
+  v_k int;
+  v_r double precision;
+  v_h bytea;
+  v_angle double precision;
+  v_dist double precision;
+begin
+  if not public.is_game_member(p_game) then return; end if;
+  select * into v_game from public.games where id = p_game;
+  if not found or v_game.status <> 'running' or v_game.mode <> 'sardines' then return; end if;
+  v_anchor := public.sardine_anchor(p_game);
+  if v_anchor.game_id is null then return; end if;
+  v_hide_end := public.hide_end(v_game);
+  v_end := v_game.started_at + make_interval(mins => (v_game.settings->>'gameMin')::int);
+  v_stages := coalesce((v_game.settings->>'zoneStages')::int, 3);
+  v_k := least(v_stages, floor(extract(epoch from now() - v_hide_end) / (extract(epoch from v_end - v_hide_end) / (v_stages + 1)))::int);
+  v_r := greatest(25, public.area_radius_m(v_game.area) * 0.8 * (v_stages + 1 - v_k) / (v_stages + 1));
+  v_h := decode(md5(coalesce(v_game.seed, 0)::text || '-' || v_game.round || '-' || v_k), 'hex');
+  v_angle := 2 * pi() * get_byte(v_h, 0) / 256.0;
+  v_dist := v_r * 0.75 * sqrt(get_byte(v_h, 1) / 255.0);
+  return query select
+    v_anchor.lat + v_dist * cos(v_angle) / 111320.0,
+    v_anchor.lng + v_dist * sin(v_angle) / (111320.0 * cos(radians(v_anchor.lat))),
+    v_r,
+    v_k;
+end;
+$$;
+
+-- The hider's own fixed spot, so their phone can warn them if they wander off.
+create function public.get_my_anchor(p_game uuid)
+returns table (lat double precision, lng double precision)
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_anchor public.sardine_anchors%rowtype;
+begin
+  if not exists (
+    select 1 from public.game_players where game_id = p_game and player_id = (select auth.uid()) and role = 'hider'
+  ) then return; end if;
+  v_anchor := public.sardine_anchor(p_game);
+  if v_anchor.game_id is null then return; end if;
+  return query select v_anchor.lat, v_anchor.lng;
+end;
+$$;
+
+-- When the timer runs out: Battle Royale survivors win; in Sardines the hider and
+-- everyone who found the group win.
+create or replace function public.end_game(p_game uuid)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_game public.games%rowtype;
+begin
+  if not public.is_game_member(p_game) then return; end if;
+  select * into v_game from public.games where id = p_game for update;
+  if not found or v_game.status <> 'running' then return; end if;
+  if now() < v_game.started_at + make_interval(mins => (v_game.settings->>'gameMin')::int) then return; end if;
+  update public.games set
+    status = 'ended', ended_at = now(), end_reason = 'time',
+    winners = array(select player_id from public.game_players
+                    where game_id = p_game and (role = 'hider' or found_at is not null))
+  where id = p_game;
+  insert into public.events (game_id, type) values (p_game, 'end');
+  perform public.record_round(p_game);
+end;
+$$;
+
+-- Battle Royale-only rules stay out of Sardines games.
+create or replace function public.zone_out(p_game uuid)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_game public.games%rowtype;
+begin
+  select * into v_game from public.games where id = p_game for update;
+  if not found or v_game.status <> 'running' or v_game.mode <> 'battle_royale' then return; end if;
+  if now() < public.hide_end(v_game) then return; end if;
+  perform public.make_hunter(p_game, (select auth.uid()), 'zone', null);
+end;
+$$;
+
+create or replace function public.sweep_signal(p_game uuid)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_game public.games%rowtype;
+  v_player uuid;
+begin
+  if not public.is_game_member(p_game) then return; end if;
+  select * into v_game from public.games where id = p_game for update;
+  if not found or v_game.status <> 'running' or v_game.mode <> 'battle_royale' then return; end if;
+  if now() < public.hide_end(v_game) then return; end if;
+  for v_player in
+    select player_id from public.game_players
+    where game_id = p_game and role = 'hider' and last_seen < now() - interval '2 minutes'
+  loop
+    perform public.make_hunter(p_game, v_player, 'signal', null);
+  end loop;
+end;
+$$;
+
+create or replace function public.leave_game(p_game uuid)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_uid uuid := (select auth.uid());
+  v_next uuid;
+begin
+  perform 1 from public.games where id = p_game for update;
+  delete from public.game_players where game_id = p_game and player_id = v_uid;
+  delete from public.positions where game_id = p_game and player_id = v_uid;
+  select player_id into v_next from public.game_players
+    where game_id = p_game order by joined_at limit 1;
+  if v_next is null then
+    delete from public.games where id = p_game;
+  else
+    update public.games set host_id = v_next where id = p_game and host_id = v_uid;
+    perform public.finish_if_done(p_game);
+    perform public.finish_sardines(p_game);
+    perform public.release_if_all_hidden(p_game);
+  end if;
+end;
+$$;
+
+-- Saving a round now covers both modes.
+create or replace function public.record_round(p_game uuid)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_game public.games%rowtype;
+  v_sardines boolean;
+  v_hunt timestamptz;
+begin
+  select * into v_game from public.games where id = p_game;
+  if not found or v_game.status <> 'ended' or v_game.started_at is null then return; end if;
+  if exists (select 1 from public.game_rounds where game_id = p_game and round = v_game.round) then return; end if;
+  v_sardines := v_game.mode = 'sardines';
+  v_hunt := least(public.hide_end(v_game), v_game.ended_at);
+
+  insert into public.game_rounds (game_id, round, mode, area, settings, started_at, hunt_at, ended_at, end_reason, seed)
+  values (p_game, v_game.round, v_game.mode, v_game.area, v_game.settings, v_game.started_at,
+          v_hunt, v_game.ended_at, v_game.end_reason, v_game.seed);
+
+  insert into public.round_players
+    (game_id, round, player_id, start_role, won, survived_sec, catches, caught_by, out_reason, out_at, found_rank, found_sec)
+  select p_game, v_game.round, gp.player_id,
+    case when v_sardines then gp.role
+         when gp.hunter_reason = 'start' then 'hunter' else 'hider' end,
+    case when v_sardines or cardinality(v_game.winners) > 0 then gp.player_id = any (v_game.winners)
+         else coalesce(gp.hunter_reason = 'start', false) end,
+    case when v_sardines or gp.hunter_reason = 'start' then null
+         else greatest(0, extract(epoch from coalesce(gp.hunter_since, v_game.ended_at) - v_game.started_at))::int end,
+    gp.catches,
+    gp.caught_by,
+    case when v_sardines or gp.hunter_reason = 'start' then null else gp.hunter_reason end,
+    case when v_sardines or gp.hunter_reason = 'start' then null else gp.hunter_since end,
+    gp.found_rank,
+    case when gp.found_at is null then null else greatest(0, extract(epoch from gp.found_at - v_hunt))::int end
+  from public.game_players gp
+  where gp.game_id = p_game and gp.role is not null;
+
+  update public.players pl set
+    games = pl.games + 1,
+    wins = pl.wins + rp.won::int,
+    catches = pl.catches + rp.catches,
+    best_survival_sec = greatest(pl.best_survival_sec, coalesce(rp.survived_sec, 0))
+  from public.round_players rp
+  where rp.game_id = p_game and rp.round = v_game.round and rp.player_id = pl.id;
+
+  delete from public.tracks t using public.game_rounds r
+  where t.game_id = r.game_id and t.round = r.round and r.ended_at < now() - interval '24 hours';
+end;
+$$;
+
+revoke execute on function public.area_radius_m(jsonb) from public, anon;
+revoke execute on function public.finish_sardines(uuid) from public, anon, authenticated;
+revoke execute on function public.sardine_anchor(uuid) from public, anon, authenticated;
+revoke execute on function public.join_sardine(uuid, text) from public, anon;
+revoke execute on function public.get_hint(uuid) from public, anon;
+revoke execute on function public.get_my_anchor(uuid) from public, anon;
+grant execute on function public.area_radius_m(jsonb) to authenticated;
+grant execute on function public.join_sardine(uuid, text) to authenticated;
+grant execute on function public.get_hint(uuid) to authenticated;
+grant execute on function public.get_my_anchor(uuid) to authenticated;

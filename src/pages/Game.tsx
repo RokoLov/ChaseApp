@@ -18,10 +18,13 @@ import {
   catchPlayer,
   endGame,
   fetchClockOffset,
+  fetchHint,
+  fetchMyAnchor,
   fetchRound,
   fetchEvents,
   fetchMyCode,
   fetchSeen,
+  joinSardine,
   leaveGame,
   markHidden,
   reportPosition,
@@ -31,13 +34,15 @@ import {
   zoneOut,
   type Game as GameData,
   type GameEvent,
+  type Hint,
   type Player,
   type Round,
   type Seen,
 } from '../lib/games'
-import { formatM } from '../lib/geo'
+import { distanceM, formatM, type LngLat } from '../lib/geo'
 import { locationHelp, useLocation } from '../lib/location'
 import { useProfile } from '../lib/profile'
+import { modeName } from '../lib/rules'
 import { play, unlockSound, type Sound } from '../lib/sound'
 import { supabase } from '../lib/supabase'
 import { useWakeLock, wakeLockSupported } from '../lib/wake'
@@ -100,6 +105,7 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
   const navigate = useNavigate()
   const rules = game.settings
   const area = game.area!
+  const sardines = game.mode === 'sardines'
   const tl = timeline(Date.parse(game.started_at!), rules, game.hide_ended_at ? Date.parse(game.hide_ended_at) : null)
 
   // The backend's clock, so every phone counts down together.
@@ -111,17 +117,31 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
   useEvery(() => setNow(Date.now() + offset), 500)
 
   const me = players.find((p) => p.id === meId)
-  const role = me?.role ?? 'hunter'
+  const role = me?.role ?? (sardines ? 'seeker' : 'hunter')
   const hunting = now >= tl.hideEnd
   const stage = stageAt(tl, now)
-  const zone = zoneCircle(area, stage, rules.zoneStages)
   const upcoming = nextShrink(tl, now)
-  const nextZone = upcoming ? zoneCircle(area, stage + 1, rules.zoneStages) : null
-  const revealing = rules.revealOnShrink && isRevealWindow(tl, now)
+  const name = (id: string | null) => (id === meId ? 'You' : (players.find((p) => p.id === id)?.nickname ?? 'A player'))
+
+  // Battle Royale numbers.
+  const zone = sardines ? null : zoneCircle(area, stage, rules.zoneStages, game.seed)
+  const nextZone = sardines || !upcoming ? null : zoneCircle(area, stage + 1, rules.zoneStages, game.seed)
+  const revealing = !sardines && rules.revealOnShrink && isRevealWindow(tl, now)
   const hidersLeft = players.filter((p) => p.role === 'hider').length
   const hunters = players.filter((p) => p.role === 'hunter').length
   const hidersHidden = players.filter((p) => p.role === 'hider' && p.hidden).length
-  const name = (id: string | null) => (id === meId ? 'You' : (players.find((p) => p.id === id)?.nickname ?? 'A player'))
+
+  // Sardines numbers.
+  const seekers = players.filter((p) => p.role === 'seeker')
+  const foundCount = seekers.filter((p) => p.foundAt).length
+  const stillSearching = seekers.filter((p) => !p.foundAt)
+  const hider = players.find((p) => p.role === 'hider')
+  const inGroup = sardines && role === 'seeker' && !!me?.foundAt
+  const searching = sardines && role === 'seeker' && !me?.foundAt
+
+  const roleLabel = sardines ? (role === 'hider' ? 'hider' : inGroup ? 'in the group' : 'seeker') : role
+  const modeBg = sardines ? 'bg-mode-sar' : 'bg-mode-br'
+  const showsCode = role === 'hider' || inGroup
 
   const { location, start: startLocation } = useLocation()
   const [entered, setEntered] = useState(false)
@@ -133,6 +153,8 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
   const [pocket, setPocket] = useState(false)
   const [myCode, setMyCode] = useState<string | null>(null)
   const [seen, setSeen] = useState<Seen[]>([])
+  const [hint, setHint] = useState<Hint | null>(null)
+  const [anchor, setAnchor] = useState<LngLat | null>(null)
 
   function notify(text: string, tone: Alert['tone'], sound: Sound) {
     setAlert({ text, tone, until: Date.now() + offset + 12_000 })
@@ -161,7 +183,27 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
     if (role !== 'hunter') setSeen([])
   }, [role])
 
-  useEvery(() => void sweepSignal(game.id), 30_000, hunting)
+  useEvery(() => void sweepSignal(game.id), 30_000, hunting && !sardines)
+
+  // Sardines: the hint circle (the backend places it around the hider's spot), asked again when it shrinks.
+  const askHint = () => void fetchHint(game.id).then(setHint)
+  useEvery(askHint, 10_000, sardines && hunting)
+  useEffect(() => {
+    if (sardines && hunting) askHint()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sardines, hunting, stage])
+
+  // Sardines: the hider's spot is fixed when the search starts; their phone warns them if they wander off.
+  useEvery(() => void fetchMyAnchor(game.id).then(setAnchor), 5000, sardines && hunting && role === 'hider' && !anchor)
+  const drift = anchor && location.status === 'on' ? distanceM(anchor, location.position) : 0
+  const wandered = sardines && role === 'hider' && hunting && drift > 20
+  const lastDriftWarning = useRef(0)
+  useEffect(() => {
+    if (wandered && now - lastDriftWarning.current > 20_000) {
+      lastDriftWarning.current = now
+      play('warn')
+    }
+  })
 
   // When the timer runs out, ask the backend to end the game (asking twice is harmless).
   const over = now >= tl.end
@@ -175,6 +217,11 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
     if (!entered || before === 0 || now - before > 5000) return
     const crossed = (t: number) => before < t && now >= t
     for (const s of tl.shrinks) {
+      if (sardines) {
+        if (crossed(s))
+          notify(searching ? 'The hint circle got smaller.' : 'The seekers’ hint circle got smaller.', 'warn', 'shrink')
+        continue
+      }
       if (crossed(s - WARN_MS)) notify('The zone shrinks in 60 seconds.', 'warn', 'warn')
       if (crossed(s)) {
         if (!rules.revealOnShrink) notify('The zone shrank.', 'warn', 'shrink')
@@ -191,7 +238,9 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
     if (!entered) return
     if (wasHunting.current === false && hunting) {
       const early = game.hide_ended_at !== null
-      notify(early ? 'Everyone is hidden. Hunters are released!' : 'Hunters are released!', 'warn', 'release')
+      if (!sardines) notify(early ? 'Everyone is hidden. Hunters are released!' : 'Hunters are released!', 'warn', 'release')
+      else if (role === 'hider') notify('The search has started. Stay where you are.', 'warn', 'release')
+      else notify('The search is on! The hider is somewhere inside the circle.', 'warn', 'release')
     }
     wasHunting.current = hunting
   })
@@ -201,7 +250,7 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
     refresh()
   }
 
-  // Things other players did: catches, zone exits, lost signal.
+  // Things other players did: catches, zone exits, lost signal, finding the group.
   const lastEvent = useRef<number | null>(null)
   const handle = (events: GameEvent[]) => {
     for (const e of events) {
@@ -217,6 +266,9 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
       } else if (e.type === 'signal') {
         if (e.target === meId) notify('Your phone lost signal for too long. You are now a hunter.', 'danger', 'youCaught')
         else notify(`${name(e.target)} lost signal and is now a hunter.`, 'warn', 'caught')
+      } else if (e.type === 'found' && e.actor !== meId) {
+        if (role === 'hider') notify(`${name(e.actor)} found you and joined your spot.`, 'warn', 'caught')
+        else notify(`${name(e.actor)} found the group.`, 'warn', 'caught')
       }
     }
     if (events.length) refresh()
@@ -245,9 +297,9 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
   latestPoll.current = pollEvents
   useEvery(pollEvents, 3000)
 
-  // A hider outside the safe zone gets a countdown; when it runs out they become a hunter.
-  const toSafe = location.status === 'on' ? distanceToSafeM(area, stage, rules.zoneStages, location.position) : 0
-  const outside = role === 'hider' && hunting && toSafe > 5
+  // Battle Royale: a hider outside the safe zone gets a countdown; when it runs out they become a hunter.
+  const toSafe = location.status === 'on' ? distanceToSafeM(area, stage, rules.zoneStages, location.position, game.seed) : 0
+  const outside = !sardines && role === 'hider' && hunting && toSafe > 5
   const [outsideSince, setOutsideSince] = useState<number | null>(null)
   const lastWarning = useRef(0)
   const reported = useRef(false)
@@ -273,9 +325,15 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
   const graceLeft = outsideSince === null ? 0 : rules.graceSec * 1000 - (now - outsideSince)
 
   async function submitCatch(code: string) {
-    const target = await catchPlayer(game.id, code)
-    setSheet(null)
-    notify(`You caught ${name(target)}!`, 'warn', 'caught')
+    if (sardines) {
+      await joinSardine(game.id, code)
+      setSheet(null)
+      notify('You found the group! Hide quietly with them.', 'warn', 'caught')
+    } else {
+      const target = await catchPlayer(game.id, code)
+      setSheet(null)
+      notify(`You caught ${name(target)}!`, 'warn', 'caught')
+    }
     refresh()
   }
 
@@ -286,23 +344,32 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
 
   // ── Role reveal: shown first, and its button is the tap that switches sound on ──
   if (!entered) {
+    const intro = sardines
+      ? role === 'hider'
+        ? 'Hide anywhere in the play area. When the search starts, stay put: everyone who finds you squeezes into your spot.'
+        : 'Wait at the start. When the search starts, a circle on your map shows roughly where the hider is. Find them and scan their code.'
+      : role === 'hider'
+        ? 'Hide inside the play area. You may move at any time.'
+        : 'Wait at the start until every hider is hidden or hide time ends. Then find the hiders and enter their codes.'
     return (
       <Screen center>
         <header className="flex w-full items-center">
-          <span className="rounded-full bg-mode-br px-2.5 py-1 text-xs font-semibold text-on-brand">Battle Royale</span>
+          <span className={`rounded-full px-2.5 py-1 text-xs font-semibold text-on-brand ${modeBg}`}>{modeName(game.mode)}</span>
           <span className="ml-auto text-[13px] text-muted">{players.length} players</span>
         </header>
         <div className="mt-auto flex flex-col items-center gap-1.5 text-center">
-          <span className="text-muted">You are a</span>
-          <span className="font-display text-[76px] font-bold uppercase leading-none text-mode-br-ink">{role}</span>
-          <p className="max-w-[300px] text-[15px] text-muted">
-            {role === 'hider'
-              ? 'Hide inside the play area. You may move at any time.'
-              : 'Wait at the start until every hider is hidden or hide time ends. Then find the hiders and enter their codes.'}
-          </p>
+          <span className="text-muted">{sardines && role === 'hider' ? 'You are the' : 'You are a'}</span>
+          <span
+            className={`font-display text-[76px] font-bold uppercase leading-none ${sardines ? 'text-mode-sar-ink' : 'text-mode-br-ink'}`}
+          >
+            {role}
+          </span>
+          <p className="max-w-[300px] text-[15px] text-muted">{intro}</p>
         </div>
         <div className="flex flex-col items-center">
-          <span className="text-sm text-muted">{hunting ? 'The hunt is on' : 'Hunters start in'}</span>
+          <span className="text-sm text-muted">
+            {hunting ? (sardines ? 'The search is on' : 'The hunt is on') : sardines ? 'The search starts in' : 'Hunters start in'}
+          </span>
           <span className="font-display text-6xl font-bold">{hunting ? clock(tl.end - now) : clock(tl.hideEnd - now)}</span>
         </div>
         <div className="mt-auto flex w-full flex-col gap-3">
@@ -338,10 +405,23 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
     banner = { text: 'CHASE cannot find your position. Check that location is on.', tone: 'danger' }
   else if (outside)
     banner = { text: `Outside the zone! Go ${formatM(toSafe)} back in. ${clock(graceLeft)} left.`, tone: 'danger' }
+  else if (wandered)
+    banner = { text: `You moved ${formatM(drift)} from your hiding spot. Go back so the hint stays fair.`, tone: 'warn' }
   else if (alert && alert.until > now) banner = alert
 
-  const status =
-    role === 'hider'
+  const status = sardines
+    ? role === 'hider'
+      ? hunting
+        ? 'Stay put. Let them find you'
+        : me?.hidden
+          ? 'Hidden. The search starts soon'
+          : 'Find a hiding spot'
+      : inGroup
+        ? 'Hide quietly with the group'
+        : hunting
+          ? 'Find the hider, then scan their code'
+          : 'Wait at the start'
+    : role === 'hider'
       ? hunting
         ? 'Stay hidden inside the zone'
         : me?.hidden
@@ -351,19 +431,46 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
         ? 'Find the hiders and enter their codes'
         : 'Wait here until hide time ends'
 
+  const subline = !hunting
+    ? `${sardines ? 'The search starts' : 'Hunters start'} in ${clock(tl.hideEnd - now)}`
+    : upcoming
+      ? `${sardines ? 'Hint shrinks' : 'Zone shrinks'} in ${clock(upcoming - now)}`
+      : sardines
+        ? 'Smallest hint'
+        : 'Final zone'
+
+  const hintCircle = sardines && hint ? { type: 'circle' as const, center: hint.center, radiusM: hint.radiusM } : null
   const mapProps = {
     area,
-    zone,
+    zone: sardines ? hintCircle : zone,
     nextZone,
     me: location.status === 'on' ? location.position : null,
     others: seen.map((s) => ({ position: s.position, kind: s.kind })),
   }
 
+  const counts = sardines
+    ? [
+        { label: 'Found the group', value: `${foundCount}/${seekers.length}` },
+        { label: 'Still searching', value: String(stillSearching.length) },
+      ]
+    : [
+        { label: 'Hiders left', value: String(hidersLeft) },
+        { label: 'Hunters', value: String(hunters) },
+      ]
+
+  const searchButtonLabel = hunting
+    ? sardines
+      ? 'Found them? Scan their code'
+      : 'Catch a hider'
+    : sardines
+      ? `The search starts in ${clock(tl.hideEnd - now)}`
+      : `Catching opens in ${clock(tl.hideEnd - now)} or when all are hidden`
+
   return (
     <Screen>
-      <header className="flex items-center gap-2 rounded-[18px] bg-mode-br px-[18px] py-3.5 text-on-brand">
+      <header className={`flex items-center gap-2 rounded-[18px] px-[18px] py-3.5 text-on-brand ${modeBg}`}>
         <div className="flex flex-col">
-          <span className="font-display text-[26px] font-bold uppercase leading-tight">{role}</span>
+          <span className="font-display text-[26px] font-bold uppercase leading-tight">{roleLabel}</span>
           <span className="text-[13px] font-medium">{status}</span>
         </div>
         <button type="button" aria-label="Game menu" onClick={() => setSheet('menu')} className="ml-auto h-11 w-11 font-display text-2xl font-bold">
@@ -373,13 +480,7 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
 
       <div className="flex flex-col items-center">
         <span className="font-display text-[76px] font-bold leading-none">{clock(tl.end - now)}</span>
-        <span className="font-display text-[15px] font-medium text-muted">
-          {!hunting
-            ? `Hunters start in ${clock(tl.hideEnd - now)}`
-            : upcoming
-              ? `Zone shrinks in ${clock(upcoming - now)}`
-              : 'Final zone'}
-        </span>
+        <span className="font-display text-[15px] font-medium text-muted">{subline}</span>
       </div>
 
       <div
@@ -398,18 +499,41 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
       </div>
 
       <div className="flex gap-2.5">
-        <Tile label="Hiders left" value={String(hidersLeft)} />
-        <Tile label="Hunters" value={String(hunters)} />
+        {counts.map((c) => (
+          <Tile key={c.label} label={c.label} value={c.value} />
+        ))}
       </div>
 
+      {sardines && hunting && (role === 'hider' || inGroup) && (
+        <p className="rounded-2xl bg-surface px-4 py-3 text-sm">
+          <span className="text-muted">Still searching: </span>
+          <span className="font-medium">{stillSearching.length ? stillSearching.map((p) => name(p.id)).join(', ') : 'nobody'}</span>
+        </p>
+      )}
+
       <div className="mt-auto flex flex-col gap-3">
-        {!hunting && <HideProgress hidden={hidersHidden} total={hidersLeft} timeLeftMs={tl.hideEnd - now} />}
+        {!hunting &&
+          (sardines ? (
+            <HideProgress
+              title={hider?.id === meId ? (me?.hidden ? 'You are hidden' : 'You are still hiding') : `${hider?.nickname ?? 'The hider'} is ${hider?.hidden ? 'hidden' : 'still hiding'}`}
+              fraction={hider?.hidden ? 1 : 0}
+              timeLabel={`Search starts in ${clock(tl.hideEnd - now)}`}
+              note="The search starts as soon as the hider taps “I’m hidden”."
+            />
+          ) : (
+            <HideProgress
+              title={`${hidersHidden} of ${hidersLeft} hiders hidden`}
+              fraction={hidersLeft ? hidersHidden / hidersLeft : 0}
+              timeLabel={`Hunters go in ${clock(tl.hideEnd - now)}`}
+              note="Hunters are released as soon as every hider taps “I’m hidden”."
+            />
+          ))}
         {role === 'hider' && !hunting && (
           <Button kind={me?.hidden ? 'secondary' : 'primary'} onClick={toggleHidden}>
             {me?.hidden ? 'Not hidden yet (undo)' : 'I’m hidden'}
           </Button>
         )}
-        {role === 'hider' ? (
+        {showsCode ? (
           <button
             type="button"
             onClick={() => setSheet('code')}
@@ -425,7 +549,7 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
           </button>
         ) : (
           <Button onClick={() => setSheet('catch')} disabled={!hunting}>
-            {hunting ? 'Catch a hider' : `Catching opens in ${clock(tl.hideEnd - now)} or when all are hidden`}
+            {searchButtonLabel}
           </Button>
         )}
         <Button kind="secondary" onClick={() => setPocket(true)}>
@@ -442,50 +566,50 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
               <MapView className="h-full w-full" fitArea flyTo={fly} {...mapProps} />
             </div>
             <div className="absolute inset-x-3 top-[max(0.75rem,env(safe-area-inset-top))] flex items-center gap-2">
-            <button
-              type="button"
-              aria-label="Close the full map"
-              onClick={() => setMapOpen(false)}
-              className="flex h-12 w-12 items-center justify-center rounded-full bg-surface/95 text-xl font-bold text-ink shadow-lg"
-            >
-              ✕
-            </button>
-            <span className="rounded-full bg-surface/95 px-3 py-1.5 text-xs font-semibold text-muted shadow-lg">
-              {stage === 0 ? 'Whole area is safe' : `Zone ${stage} of ${rules.zoneStages}`}
-            </span>
-            {location.status === 'on' && (
               <button
                 type="button"
-                onClick={() => setFly({ id: Date.now(), center: location.position, zoom: 17 })}
-                className="ml-auto h-12 rounded-full bg-surface/95 px-4 text-sm font-semibold text-ink shadow-lg"
+                aria-label="Close the full map"
+                onClick={() => setMapOpen(false)}
+                className="flex h-12 w-12 items-center justify-center rounded-full bg-surface/95 text-xl font-bold text-ink shadow-lg"
               >
-                ◎ Me
+                ✕
               </button>
-            )}
+              <span className="rounded-full bg-surface/95 px-3 py-1.5 text-xs font-semibold text-muted shadow-lg">
+                {sardines
+                  ? hunting
+                    ? `Hint ${stage + 1} of ${rules.zoneStages + 1}`
+                    : 'The hint appears when the search starts'
+                  : stage === 0
+                    ? 'Whole area is safe'
+                    : `Zone ${stage} of ${rules.zoneStages}`}
+              </span>
+              {location.status === 'on' && (
+                <button
+                  type="button"
+                  onClick={() => setFly({ id: Date.now(), center: location.position, zoom: 17 })}
+                  className="ml-auto h-12 rounded-full bg-surface/95 px-4 text-sm font-semibold text-ink shadow-lg"
+                >
+                  ◎ Me
+                </button>
+              )}
             </div>
           </div>
           <div className="relative z-10 -mt-5 flex flex-col gap-2.5 rounded-t-[24px] bg-surface px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3.5 shadow-[0_-8px_24px_rgba(0,0,0,0.25)]">
             <div className="flex items-center gap-3">
-              <span className="rounded-full bg-mode-br px-3 py-1.5 font-display text-sm font-bold uppercase text-on-brand">{role}</span>
+              <span className={`whitespace-nowrap rounded-full px-3 py-1.5 font-display text-sm font-bold uppercase text-on-brand ${modeBg}`}>
+                {roleLabel}
+              </span>
               <div className="flex flex-col">
                 <span className="font-display text-[40px] font-bold leading-none">{clock(tl.end - now)}</span>
-                <span className="text-xs font-medium text-muted">
-                  {!hunting
-                    ? `Hunters start in ${clock(tl.hideEnd - now)}`
-                    : upcoming
-                      ? `Zone shrinks in ${clock(upcoming - now)}`
-                      : 'Final zone'}
-                </span>
+                <span className="text-xs font-medium text-muted">{subline}</span>
               </div>
               <div className="ml-auto flex gap-3 text-center">
-                <div className="flex flex-col">
-                  <span className="font-display text-2xl font-bold leading-none">{hidersLeft}</span>
-                  <span className="text-[11px] text-muted">hiders</span>
-                </div>
-                <div className="flex flex-col">
-                  <span className="font-display text-2xl font-bold leading-none">{hunters}</span>
-                  <span className="text-[11px] text-muted">hunters</span>
-                </div>
+                {counts.map((c) => (
+                  <div key={c.label} className="flex flex-col">
+                    <span className="font-display text-2xl font-bold leading-none">{c.value}</span>
+                    <span className="max-w-[64px] text-[11px] leading-tight text-muted">{c.label.toLowerCase()}</span>
+                  </div>
+                ))}
               </div>
             </div>
             {banner && (
@@ -494,7 +618,7 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
               </div>
             )}
             <div className="flex gap-2.5">
-              {role === 'hider' ? (
+              {showsCode ? (
                 <button
                   type="button"
                   onClick={() => setSheet('code')}
@@ -507,23 +631,35 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
               ) : (
                 <div className="flex-1">
                   <Button onClick={() => setSheet('catch')} disabled={!hunting}>
-                    {hunting ? 'Catch a hider' : `Catching opens in ${clock(tl.hideEnd - now)}`}
+                    {hunting ? searchButtonLabel : `${sardines ? 'Search starts' : 'Catching opens'} in ${clock(tl.hideEnd - now)}`}
                   </Button>
                 </div>
               )}
             </div>
             <p className="text-[11px] text-muted">
-              Blue dot: you · Green: safe zone{nextZone ? ' · Dashed: next zone' : ''}
-              {role === 'hunter' ? ' · Orange: hunters, green dots: hiders during a reveal' : ' · Hunters see you briefly after each shrink'}
+              {sardines
+                ? 'Blue dot: you · Green circle: the hider is somewhere inside it. It shrinks over time.'
+                : `Blue dot: you · Green: safe zone${nextZone ? ' · Dashed: next zone' : ''}${
+                    role === 'hunter' ? ' · Orange: hunters, green dots: hiders during a reveal' : ' · Hunters see you briefly after each shrink'
+                  }`}
             </p>
           </div>
         </div>
       )}
       {sheet === 'code' && myCode && <CodeSheet code={myCode} onClose={() => setSheet(null)} />}
-      {sheet === 'catch' && <CatchSheet onSubmit={submitCatch} onClose={() => setSheet(null)} />}
+      {sheet === 'catch' &&
+        (sardines ? (
+          <CatchSheet onSubmit={submitCatch} onClose={() => setSheet(null)} title="Join the group" confirm="Join the group" whose="hider’s" />
+        ) : (
+          <CatchSheet onSubmit={submitCatch} onClose={() => setSheet(null)} />
+        ))}
       {sheet === 'menu' && (
         <Sheet title="Game menu" onClose={() => setSheet(null)}>
-          <p className="text-sm text-muted">Leaving removes you from this game. The others keep playing.</p>
+          <p className="text-sm text-muted">
+            {sardines && role === 'hider'
+              ? 'You are the hider: if you leave, the game ends for everyone.'
+              : 'Leaving removes you from this game. The others keep playing.'}
+          </p>
           <div className="mt-auto flex flex-col gap-3">
             <Button kind="danger" onClick={leave}>
               Leave the game
@@ -539,20 +675,18 @@ function Running({ game, players, meId, refresh }: { game: GameData; players: Pl
   )
 }
 
-/** During hide time: how many hiders are hidden, and when hunters go anyway. */
-function HideProgress({ hidden, total, timeLeftMs }: { hidden: number; total: number; timeLeftMs: number }) {
+/** During hide time: who is hidden, and when the hunt starts anyway. */
+function HideProgress({ title, fraction, timeLabel, note }: { title: string; fraction: number; timeLabel: string; note: string }) {
   return (
     <div className="flex flex-col gap-1.5 rounded-2xl bg-surface p-3">
       <div className="flex items-baseline">
-        <span className="font-display text-[15px] font-medium">
-          {hidden} of {total} hiders hidden
-        </span>
-        <span className="ml-auto text-xs text-muted">Hunters go in {clock(timeLeftMs)}</span>
+        <span className="font-display text-[15px] font-medium">{title}</span>
+        <span className="ml-auto text-xs text-muted">{timeLabel}</span>
       </div>
       <div className="h-2 overflow-hidden rounded-full bg-raised">
-        <div className="h-full rounded-full bg-brand" style={{ width: `${total ? (hidden / total) * 100 : 0}%` }} />
+        <div className="h-full rounded-full bg-brand" style={{ width: `${fraction * 100}%` }} />
       </div>
-      <span className="text-xs text-muted">Hunters are released as soon as every hider taps “I’m hidden”.</span>
+      <span className="text-xs text-muted">{note}</span>
     </div>
   )
 }
