@@ -4,6 +4,7 @@ import { BackHeader, Button, Note, Screen, SectionLabel } from '../components/ui
 import { useProfile } from '../lib/profile'
 import { backendReady } from '../lib/supabase'
 import { useTheme, type Appearance } from '../lib/theme'
+import { APP_VERSION, MILESTONE, MILESTONE_NAME } from '../lib/version'
 
 const options: { value: Appearance; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -86,7 +87,9 @@ export default function Settings() {
             Reset profile
           </Button>
         )}
-        <Note>CHASE version 0.4 · milestone 4</Note>
+        <Note>
+          CHASE version {APP_VERSION} · milestone {MILESTONE} ({MILESTONE_NAME})
+        </Note>
       </div>
     </Screen>
   )

@@ -16,11 +16,13 @@ export type Game = {
   started_at: string | null
   ended_at: string | null
   winners: string[]
-  end_reason: 'last_hider' | 'all_caught' | 'time' | null
+  end_reason: 'last_hider' | 'all_caught' | 'time' | 'all_found' | 'hider_left' | null
   /** Set when every hider said they were hidden before the hide timer ran out. */
   hide_ended_at: string | null
   /** Counts up each time the game starts ("Play again" starts round 2, 3...). */
   round: number
+  /** Random number for this round: places the Battle Royale zone the same way on every phone. */
+  seed: number | null
 }
 
 export type Player = {
@@ -28,18 +30,22 @@ export type Player = {
   nickname: string
   photo: string | null
   ready: boolean
-  role: 'hider' | 'hunter' | null
+  /** Battle Royale: hider or hunter. Sardines: the one hider, and seekers. */
+  role: 'hider' | 'hunter' | 'seeker' | null
   hunterSince: string | null
   hunterReason: 'start' | 'caught' | 'zone' | 'signal' | null
   caughtBy: string | null
   catches: number
   /** A hider tapped "I'm hidden". */
   hidden: boolean
+  /** Sardines: when this seeker found the group, and in which place. */
+  foundAt: string | null
+  foundRank: number | null
 }
 
 export type GameEvent = {
   id: number
-  type: 'start' | 'caught' | 'zone' | 'signal' | 'end' | 'release'
+  type: 'start' | 'caught' | 'zone' | 'signal' | 'end' | 'release' | 'found'
   actor: string | null
   target: string | null
 }
@@ -54,11 +60,12 @@ const messages: Record<string, string> = {
   NEED_TWO_PLAYERS: 'A game needs at least 2 players.',
   NOT_ALL_READY: 'Someone is not ready yet.',
   BAD_HUNTERS: 'Pick at least one hunter and leave at least one hider.',
-  WRONG_CODE: 'That code does not belong to a hider. Check it and try again.',
+  WRONG_CODE: 'That code is not right. Check it and try again.',
   TOO_FAR: 'That player is too far away to be caught.',
   HIDE_TIME: 'Hunters cannot catch anyone until hide time is over.',
   NOT_HUNTER: 'Only hunters can catch.',
   NOT_RUNNING: 'The game is not running.',
+  NOT_SEEKER: 'You are already in the group.',
 }
 
 /** Turn a backend error into a sentence a player can act on. */
@@ -138,6 +145,32 @@ export async function resetGame(gameId: string) {
 /** A hider says they are hidden (or not yet). When every hider is, hunters are released early. */
 export const markHidden = (gameId: string, hidden: boolean) => supabase?.rpc('mark_hidden', { p_game: gameId, p_hidden: hidden })
 
+/** Sardines: a seeker enters the code of the hider (or anyone already in the group). */
+export async function joinSardine(gameId: string, code: string): Promise<string> {
+  const db = await requireBackend()
+  const { data, error } = await db.rpc('join_sardine', { p_game: gameId, p_code: code })
+  if (error || !data) throw new Error(friendly(error, 'That did not go through. Try again.'))
+  return data as string
+}
+
+export type Hint = { center: LngLat; radiusM: number; stage: number }
+
+/** Sardines: the hint circle around the hider's spot. The backend works it out; null before the search. */
+export async function fetchHint(gameId: string): Promise<Hint | null> {
+  if (!supabase) return null
+  const { data } = await supabase.rpc('get_hint', { p_game: gameId })
+  const row = (data as { lat: number; lng: number; radius_m: number; stage: number }[] | null)?.[0]
+  return row ? { center: [row.lng, row.lat], radiusM: row.radius_m, stage: row.stage } : null
+}
+
+/** Sardines: the hider's own fixed spot, so the phone can warn them when they wander off. */
+export async function fetchMyAnchor(gameId: string): Promise<LngLat | null> {
+  if (!supabase) return null
+  const { data } = await supabase.rpc('get_my_anchor', { p_game: gameId })
+  const row = (data as { lat: number; lng: number }[] | null)?.[0]
+  return row ? [row.lng, row.lat] : null
+}
+
 export const zoneOut = (gameId: string) => supabase?.rpc('zone_out', { p_game: gameId })
 export const sweepSignal = (gameId: string) => supabase?.rpc('sweep_signal', { p_game: gameId })
 export const endGame = (gameId: string) => supabase?.rpc('end_game', { p_game: gameId })
@@ -204,6 +237,8 @@ type PlayerRow = {
   caught_by: string | null
   catches: number
   hidden: boolean | null
+  found_at: string | null
+  found_rank: number | null
   players: { nickname: string; photo_url: string | null } | { nickname: string; photo_url: string | null }[] | null
 }
 
@@ -211,7 +246,7 @@ async function fetchLobby(code: string): Promise<{ game: Game; players: Player[]
   if (!supabase) return null
   const { data: game } = await supabase
     .from('games')
-    .select('id, code, host_id, mode, status, preset, settings, area, started_at, ended_at, winners, end_reason, hide_ended_at, round')
+    .select('id, code, host_id, mode, status, preset, settings, area, started_at, ended_at, winners, end_reason, hide_ended_at, round, seed')
     .eq('code', code)
     .maybeSingle()
   if (!game) return null
@@ -219,7 +254,7 @@ async function fetchLobby(code: string): Promise<{ game: Game; players: Player[]
   const { data: rows } = await supabase
     .from('game_players')
     .select(
-      'player_id, ready, role, hunter_since, hunter_reason, caught_by, catches, hidden, players!game_players_player_id_fkey(nickname, photo_url)',
+      'player_id, ready, role, hunter_since, hunter_reason, caught_by, catches, hidden, found_at, found_rank, players!game_players_player_id_fkey(nickname, photo_url)',
     )
     .eq('game_id', game.id)
     .order('joined_at')
@@ -236,10 +271,12 @@ async function fetchLobby(code: string): Promise<{ game: Game; players: Player[]
       caughtBy: r.caught_by,
       catches: r.catches ?? 0,
       hidden: r.hidden ?? false,
+      foundAt: r.found_at ?? null,
+      foundRank: r.found_rank ?? null,
     }
   })
   const g = game as Game
-  return { game: { ...g, winners: g.winners ?? [], round: g.round ?? 0, hide_ended_at: g.hide_ended_at ?? null }, players }
+  return { game: { ...g, winners: g.winners ?? [], round: g.round ?? 0, hide_ended_at: g.hide_ended_at ?? null, seed: g.seed ?? null }, players }
 }
 
 export type LobbyState =
@@ -316,7 +353,7 @@ export type RoundPlayer = {
   id: string
   nickname: string
   photo: string | null
-  startRole: 'hider' | 'hunter'
+  startRole: 'hider' | 'hunter' | 'seeker'
   won: boolean
   /** Seconds from the start until caught, or until the end. Hiders only. */
   survivedSec: number | null
@@ -324,6 +361,9 @@ export type RoundPlayer = {
   caughtBy: string | null
   outReason: 'caught' | 'zone' | 'signal' | null
   outAt: string | null
+  /** Sardines: place in which this seeker found the group, and seconds into the search. */
+  foundRank: number | null
+  foundSec: number | null
 }
 
 export type Round = {
@@ -336,6 +376,7 @@ export type Round = {
   huntAt: string
   endedAt: string
   endReason: Game['end_reason']
+  seed: number | null
   players: RoundPlayer[]
 }
 
@@ -348,6 +389,8 @@ type RoundPlayerRow = {
   caught_by: string | null
   out_reason: RoundPlayer['outReason']
   out_at: string | null
+  found_rank: number | null
+  found_sec: number | null
   players: { nickname: string; photo_url: string | null } | { nickname: string; photo_url: string | null }[] | null
 }
 
@@ -356,7 +399,7 @@ export async function fetchRound(gameId: string, round: number): Promise<Round |
   if (!supabase) return null
   const { data: r } = await supabase
     .from('game_rounds')
-    .select('game_id, round, mode, area, settings, started_at, hunt_at, ended_at, end_reason')
+    .select('game_id, round, mode, area, settings, started_at, hunt_at, ended_at, end_reason, seed')
     .eq('game_id', gameId)
     .eq('round', round)
     .maybeSingle()
@@ -364,7 +407,7 @@ export async function fetchRound(gameId: string, round: number): Promise<Round |
   const { data: rows } = await supabase
     .from('round_players')
     .select(
-      'player_id, start_role, won, survived_sec, catches, caught_by, out_reason, out_at, players!round_players_player_id_fkey(nickname, photo_url)',
+      'player_id, start_role, won, survived_sec, catches, caught_by, out_reason, out_at, found_rank, found_sec, players!round_players_player_id_fkey(nickname, photo_url)',
     )
     .eq('game_id', gameId)
     .eq('round', round)
@@ -381,6 +424,8 @@ export async function fetchRound(gameId: string, round: number): Promise<Round |
       caughtBy: x.caught_by,
       outReason: x.out_reason,
       outAt: x.out_at,
+      foundRank: x.found_rank,
+      foundSec: x.found_sec,
     }
   })
   const row = r as {
@@ -393,6 +438,7 @@ export async function fetchRound(gameId: string, round: number): Promise<Round |
     hunt_at: string
     ended_at: string
     end_reason: Game['end_reason']
+    seed: number | null
   }
   return {
     gameId: row.game_id,
@@ -404,7 +450,8 @@ export async function fetchRound(gameId: string, round: number): Promise<Round |
     huntAt: row.hunt_at,
     endedAt: row.ended_at,
     endReason: row.end_reason,
-    players: rankRound(players),
+    seed: row.seed,
+    players: row.mode === 'sardines' ? rankSardines(players) : rankRound(players),
   }
 }
 
@@ -417,6 +464,12 @@ export function rankRound(players: RoundPlayer[]): RoundPlayer[] {
     for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return y[i] - x[i]
     return a.nickname.localeCompare(b.nickname)
   })
+}
+
+/** Sardines: the hider, then seekers in the order they found the group, then those still searching. */
+export function rankSardines(players: RoundPlayer[]): RoundPlayer[] {
+  const key = (p: RoundPlayer) => (p.startRole === 'hider' ? 0 : (p.foundRank ?? 1000))
+  return [...players].sort((a, b) => key(a) - key(b) || a.nickname.localeCompare(b.nickname))
 }
 
 export type TrackPoint = { player: string; at: number; position: LngLat }

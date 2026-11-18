@@ -27,12 +27,18 @@ export function StartSheet({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
-  const auto = game.settings.hunters || (players.length >= 8 ? 2 : 1)
+  // Battle Royale: the host picks the hunters. Sardines: the host picks the one hider.
+  const sardines = game.mode === 'sardines'
+  const auto = sardines ? 1 : game.settings.hunters || (players.length >= 8 ? 2 : 1)
   const allTicked = ticked.every(Boolean)
-  const pickValid = hunters.length >= 1 && hunters.length <= players.length - 1
+  const pickValid = sardines ? hunters.length === 1 : hunters.length >= 1 && hunters.length <= players.length - 1
+  const special = sardines ? 'Hider' : 'Hunter'
+  const regular = sardines ? 'Seeker' : 'Hider'
+  const tone = sardines ? 'mode-sar' : 'mode-br'
 
   function toggle(id: string) {
-    setHunters(hunters.includes(id) ? hunters.filter((h) => h !== id) : [...hunters, id])
+    if (sardines) setHunters([id])
+    else setHunters(hunters.includes(id) ? hunters.filter((h) => h !== id) : [...hunters, id])
   }
 
   async function start() {
@@ -64,8 +70,8 @@ export function StartSheet({
         ))}
       </div>
 
-      <h2 className="text-xs font-semibold uppercase tracking-wide text-muted">Hunters</h2>
-      <div className="flex gap-2" role="radiogroup" aria-label="How hunters are chosen">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-muted">{sardines ? 'Hider' : 'Hunters'}</h2>
+      <div className="flex gap-2" role="radiogroup" aria-label={sardines ? 'How the hider is chosen' : 'How hunters are chosen'}>
         {[
           { on: !pick, label: `Random (${Math.min(auto, players.length - 1)})`, set: () => setPick(false) },
           { on: pick, label: 'I choose', set: () => setPick(true) },
@@ -96,17 +102,17 @@ export function StartSheet({
                   aria-pressed={on}
                   onClick={() => toggle(p.id)}
                   className={`flex w-full items-center gap-2.5 rounded-xl border-2 bg-surface px-3 py-2 text-left ${
-                    on ? 'border-mode-br' : 'border-transparent'
+                    on ? (tone === 'mode-sar' ? 'border-mode-sar' : 'border-mode-br') : 'border-transparent'
                   }`}
                 >
                   <Avatar name={p.nickname} photo={p.photo} size={34} />
                   <span className="font-display font-medium">{p.nickname}</span>
                   <span
                     className={`ml-auto rounded-full px-2.5 py-1 text-xs font-semibold ${
-                      on ? 'bg-mode-br text-on-brand' : 'bg-raised text-muted'
+                      on ? (tone === 'mode-sar' ? 'bg-mode-sar' : 'bg-mode-br') + ' text-on-brand' : 'bg-raised text-muted'
                     }`}
                   >
-                    {on ? 'Hunter' : 'Hider'}
+                    {on ? special : regular}
                   </span>
                 </button>
               </li>
@@ -121,7 +127,9 @@ export function StartSheet({
             {error}
           </div>
         )}
-        {pick && !pickValid && <Note>Pick at least one hunter and leave at least one hider.</Note>}
+        {pick && !pickValid && (
+          <Note>{sardines ? 'Pick the player who hides.' : 'Pick at least one hunter and leave at least one hider.'}</Note>
+        )}
         <Button onClick={start} disabled={busy || !allTicked || (pick && !pickValid)}>
           {busy ? 'Starting…' : 'Start game'}
         </Button>

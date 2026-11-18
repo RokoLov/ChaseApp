@@ -9,7 +9,24 @@ import { modeName } from '../lib/rules'
 
 const time = (sec: number | null) => (sec === null ? '–' : clock(sec * 1000))
 
+const ordinal = (n: number) => `${n}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`
+
+function sardinesTitle(round: Round): string {
+  const hider = round.players.find((p) => p.startRole === 'hider')
+  const seekers = round.players.filter((p) => p.startRole === 'seeker')
+  const found = seekers.filter((p) => p.foundRank !== null)
+  if (round.endReason === 'hider_left') return 'The hider left'
+  if (round.endReason === 'all_found') {
+    if (seekers.length === 1) return `${seekers[0].nickname} found ${hider?.nickname ?? 'the hider'}`
+    const last = [...found].sort((a, b) => (b.foundRank ?? 0) - (a.foundRank ?? 0))[0]
+    return `${last?.nickname ?? 'Someone'} found the group last`
+  }
+  if (found.length === 0) return `${hider?.nickname ?? 'The hider'} stayed hidden`
+  return `${found.length} of ${seekers.length} found ${hider?.nickname ?? 'the hider'}`
+}
+
 function resultTitle(round: Round): string {
+  if (round.mode === 'sardines') return sardinesTitle(round)
   const winners = round.players.filter((p) => p.won)
   if (round.endReason === 'all_caught') return 'Hunters win'
   if (winners.length === 1) return `${winners[0].nickname} wins`
@@ -17,13 +34,24 @@ function resultTitle(round: Round): string {
 }
 
 const reasonText = (round: Round) =>
-  round.endReason === 'last_hider'
+  round.endReason === 'all_found'
+    ? 'Everyone found the hiding spot'
+    : round.endReason === 'hider_left'
+      ? 'The game ended early'
+      : round.mode === 'sardines'
+        ? 'Time ran out with seekers still searching'
+        : round.endReason === 'last_hider'
     ? 'Last hider standing'
     : round.endReason === 'time'
       ? 'Time ran out with hiders still free'
       : 'Every hider was caught'
 
-function outcome(p: RoundPlayer, nameOf: (id: string | null) => string): string {
+function outcome(p: RoundPlayer, nameOf: (id: string | null) => string, round: Round): string {
+  if (round.mode === 'sardines') {
+    if (p.startRole === 'hider') return p.won ? 'The hider · won' : 'The hider'
+    if (p.foundRank !== null) return `Found the group ${ordinal(p.foundRank)} · ${time(p.foundSec)} into the search`
+    return 'Still searching at the end'
+  }
   let base: string
   if (p.startRole === 'hunter') base = p.won ? 'Started as hunter · caught everyone' : 'Started as hunter'
   else if (p.won) base = `Survived · ${time(p.survivedSec)}`
@@ -58,7 +86,11 @@ export function RoundResults({ round, meId, actions }: { round: Round; meId: str
     <Screen>
       <header className="flex items-center">
         <h1 className="font-display text-2xl font-bold">Game over</h1>
-        <span className="ml-auto rounded-full bg-mode-br px-2.5 py-1 text-xs font-semibold text-on-brand">
+        <span
+          className={`ml-auto rounded-full px-2.5 py-1 text-xs font-semibold text-on-brand ${
+            round.mode === 'sardines' ? 'bg-mode-sar' : 'bg-mode-br'
+          }`}
+        >
           {modeName(round.mode)}
         </span>
       </header>
@@ -90,14 +122,29 @@ export function RoundResults({ round, meId, actions }: { round: Round; meId: str
             </span>
           </div>
           <div className="flex text-center">
-            <div className="flex flex-1 flex-col">
-              <span className="font-display text-2xl font-bold">{me.startRole === 'hider' ? time(me.survivedSec) : '–'}</span>
-              <span className="text-xs text-muted">Time survived</span>
-            </div>
-            <div className="flex flex-1 flex-col">
-              <span className="font-display text-2xl font-bold">{me.catches}</span>
-              <span className="text-xs text-muted">Catches</span>
-            </div>
+            {round.mode === 'sardines' ? (
+              <>
+                <div className="flex flex-1 flex-col">
+                  <span className="font-display text-2xl font-bold">{me.foundRank !== null ? ordinal(me.foundRank) : '–'}</span>
+                  <span className="text-xs text-muted">Found the group</span>
+                </div>
+                <div className="flex flex-1 flex-col">
+                  <span className="font-display text-2xl font-bold">{time(me.foundSec)}</span>
+                  <span className="text-xs text-muted">Search time</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex flex-1 flex-col">
+                  <span className="font-display text-2xl font-bold">{me.startRole === 'hider' ? time(me.survivedSec) : '–'}</span>
+                  <span className="text-xs text-muted">Time survived</span>
+                </div>
+                <div className="flex flex-1 flex-col">
+                  <span className="font-display text-2xl font-bold">{me.catches}</span>
+                  <span className="text-xs text-muted">Catches</span>
+                </div>
+              </>
+            )}
             <div className="flex flex-1 flex-col">
               <span className="font-display text-2xl font-bold capitalize">{me.startRole}</span>
               <span className="text-xs text-muted">Started as</span>
@@ -118,7 +165,7 @@ export function RoundResults({ round, meId, actions }: { round: Round; meId: str
                   {p.nickname}
                   {p.id === meId ? ' (you)' : ''}
                 </span>
-                <span className="text-xs text-muted">{outcome(p, nameOf)}</span>
+                <span className="text-xs text-muted">{outcome(p, nameOf, round)}</span>
               </div>
               {p.id !== meId &&
                 (isFriend ? (

@@ -5,7 +5,7 @@ import { Button, Note, Screen } from '../components/ui'
 import { useArena } from '../lib/arena'
 import { createGame } from '../lib/games'
 import type { Area } from '../lib/geo'
-import { modes, presets, ruleRows, type BattleRoyaleRules, type Mode, type Preset } from '../lib/rules'
+import { modes, presetsFor, ruleRowsFor, type BattleRoyaleRules, type Mode, type Preset } from '../lib/rules'
 
 const modeBg: Record<Mode, string> = {
   battle_royale: 'bg-mode-br',
@@ -31,13 +31,13 @@ export default function Create() {
   const [mode, setMode] = useState<Mode>('battle_royale')
   const [area, setArea] = useState<Area | null>(startArea)
   const [preset, setPreset] = useState<Preset>('classic')
-  const [rules, setRules] = useState<BattleRoyaleRules>(presets.classic)
+  const [rules, setRules] = useState<BattleRoyaleRules>(presetsFor('battle_royale').classic)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   function choosePreset(p: Preset) {
     setPreset(p)
-    if (p !== 'custom') setRules(presets[p])
+    if (p !== 'custom') setRules(presetsFor(mode)[p])
   }
 
   function change(key: keyof BattleRoyaleRules, delta: number, min: number, max: number) {
@@ -87,7 +87,12 @@ export default function Create() {
               key={m.id}
               type="button"
               disabled={!m.built}
-              onClick={() => setMode(m.id)}
+              onClick={() => {
+                setMode(m.id)
+                // Each mode has its own rules: start from that mode's Classic preset.
+                setPreset('classic')
+                setRules(presetsFor(m.id).classic)
+              }}
               className={`flex items-center gap-3.5 rounded-[20px] border-2 bg-surface p-4 text-left disabled:opacity-50 ${
                 selected ? modeBorder[m.id] : 'border-transparent'
               }`}
@@ -148,7 +153,7 @@ export default function Create() {
       </div>
 
       <div className="flex flex-col gap-2">
-        {ruleRows.map((row) => (
+        {ruleRowsFor(mode).map((row) => (
           <div key={row.key} className="flex items-center gap-2 rounded-xl bg-surface px-4 py-3 text-sm">
             <span className="text-muted">{row.label}</span>
             <span className="ml-auto flex items-center gap-2">
@@ -178,6 +183,7 @@ export default function Create() {
             </span>
           </div>
         ))}
+        {mode === 'battle_royale' && (
         <div className="flex items-center gap-2 rounded-xl bg-surface px-4 py-3 text-sm">
           <span className="text-muted">Position reveal on shrink</span>
           <button
@@ -189,8 +195,15 @@ export default function Create() {
             {rules.revealOnShrink ? 'On' : 'Off'}
           </button>
         </div>
+        )}
       </div>
 
+      {mode === 'sardines' && (
+        <p className="rounded-xl bg-surface px-4 py-3 text-xs text-muted">
+          One player hides; everyone else searches. Searchers get a hint circle that always contains the hider and
+          shrinks over time. Whoever finds the group last loses.
+        </p>
+      )}
       <p className="text-xs text-muted">
         {preset === 'custom' ? 'Use − and + to change a rule.' : 'Choose Custom to change any rule.'}
       </p>

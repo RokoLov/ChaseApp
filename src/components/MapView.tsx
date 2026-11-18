@@ -119,10 +119,19 @@ export function MapView(props: MapProps) {
     }
 
     if (fitArea && area) {
-      const key = JSON.stringify(boundsOf(area))
+      // Keep the whole play area in view, and the zone or hint circle too when it reaches past the edge.
+      let box = boundsOf(area)
+      if (zone) {
+        const z = boundsOf(zone)
+        box = [
+          [Math.min(box[0][0], z[0][0]), Math.min(box[0][1], z[0][1])],
+          [Math.max(box[1][0], z[1][0]), Math.max(box[1][1], z[1][1])],
+        ]
+      }
+      const key = JSON.stringify(box)
       if (sent.current.fit !== key) {
         sent.current.fit = key
-        m.fitBounds(boundsOf(area), { padding: 28, animate: false, maxZoom: 18 })
+        m.fitBounds(box, { padding: 28, animate: false, maxZoom: 18 })
       }
     }
   }
